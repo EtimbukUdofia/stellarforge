@@ -418,7 +418,7 @@ mod tests {
     fn setup() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(ForgeVesting, ());
+        let contract_id = env.register_contract(None, ForgeVesting);
         let token = Address::generate(&env);
         let beneficiary = Address::generate(&env);
         let admin = Address::generate(&env);
@@ -458,7 +458,7 @@ mod tests {
         let (env, contract_id, token, beneficiary, admin) = setup();
         let client = ForgeVestingClient::new(&env, &contract_id);
         client.initialize(&token, &beneficiary, &admin, &1_000_000, &500, &1000);
-        let status = client.get_status().unwrap();
+        let status = client.get_status();
         assert!(!status.cliff_reached);
         assert_eq!(status.claimable, 0);
         assert_eq!(status.claimed, 0);
@@ -475,18 +475,18 @@ mod tests {
 
     #[test]
     fn test_cancel_by_admin() {
-        let (env, contract_id, token, beneficiary, admin) = setup();
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
         let client = ForgeVestingClient::new(&env, &contract_id);
-        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &100, &1000);
         let result = client.try_cancel();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_double_cancel_fails() {
-        let (env, contract_id, token, beneficiary, admin) = setup();
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
         let client = ForgeVestingClient::new(&env, &contract_id);
-        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &100, &1000);
         client.cancel();
         let result = client.try_cancel();
         assert_eq!(result, Err(Ok(VestingError::Cancelled)));
@@ -494,9 +494,9 @@ mod tests {
 
     #[test]
     fn test_claim_after_cancel_fails() {
-        let (env, contract_id, token, beneficiary, admin) = setup();
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
         let client = ForgeVestingClient::new(&env, &contract_id);
-        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &100, &1000);
         client.cancel();
         env.ledger().with_mut(|l| l.timestamp += 200);
         let result = client.try_claim();
@@ -509,7 +509,7 @@ mod tests {
         let client = ForgeVestingClient::new(&env, &contract_id);
         client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
         env.ledger().with_mut(|l| l.timestamp += 2000);
-        let status = client.get_status().unwrap();
+        let status = client.get_status();
         assert!(status.fully_vested);
         assert_eq!(status.vested, 1_000_000);
     }

@@ -464,7 +464,9 @@ mod tests {
         Env, String,
     };
 
-    fn setup(env: &Env) -> GovernorConfig {
+    fn setup(env: &Env) -> GovernorContractClient {
+        let contract_id = env.register_contract(None, GovernorContract);
+        let client = GovernorContractClient::new(env, &contract_id);
         let token = Address::generate(env);
         let config = GovernorConfig {
             vote_token: token,
@@ -472,8 +474,8 @@ mod tests {
             quorum: 100,
             timelock_delay: 86400,
         };
-        GovernorContract::initialize(env.clone(), config.clone()).unwrap();
-        config
+        client.initialize(&config);
+        client
     }
 
     #[test]
@@ -481,25 +483,16 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1000);
-        env.register(GovernorContract, ());
-        setup(&env);
+        let client = setup(&env);
 
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let pid = GovernorContract::propose(
-            env.clone(),
-            proposer,
-            String::from_str(&env, "Test Proposal"),
-            String::from_str(&env, "A test"),
-        )
-        .unwrap();
+        let pid = client.propose(&proposer, &String::from_str(&env, "Test Proposal"), &String::from_str(&env, "A test"));
+        client.vote(&voter, &pid, &true, &200);
 
-        GovernorContract::vote(env.clone(), voter, pid, true, 200).unwrap();
-
-        // Advance past voting period
         env.ledger().with_mut(|l| l.timestamp = 5000);
-        let state = GovernorContract::finalize(env.clone(), pid).unwrap();
+        let state = client.finalize(&pid);
         assert_eq!(state, ProposalState::Passed);
     }
 
@@ -508,24 +501,16 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
-        env.register(GovernorContract, ());
-        setup(&env);
+        let client = setup(&env);
 
         let proposer = Address::generate(&env);
-        let pid = GovernorContract::propose(
-            env.clone(),
-            proposer,
-            String::from_str(&env, "Low vote"),
-            String::from_str(&env, "desc"),
-        )
-        .unwrap();
+        let pid = client.propose(&proposer, &String::from_str(&env, "Low vote"), &String::from_str(&env, "desc"));
 
-        // Vote with less than quorum (100)
         let voter = Address::generate(&env);
-        GovernorContract::vote(env.clone(), voter, pid, true, 50).unwrap();
+        client.vote(&voter, &pid, &true, &50);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
-        let state = GovernorContract::finalize(env.clone(), pid).unwrap();
+        let state = client.finalize(&pid);
         assert_eq!(state, ProposalState::Failed);
     }
 
@@ -534,22 +519,15 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
-        env.register(GovernorContract, ());
-        setup(&env);
+        let client = setup(&env);
 
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
-        let pid = GovernorContract::propose(
-            env.clone(),
-            proposer,
-            String::from_str(&env, "P"),
-            String::from_str(&env, "D"),
-        )
-        .unwrap();
+        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
 
-        GovernorContract::vote(env.clone(), voter.clone(), pid, true, 100).unwrap();
-        let result = GovernorContract::vote(env, voter, pid, true, 100);
-        assert_eq!(result, Err(GovernorError::AlreadyVoted));
+        client.vote(&voter, &pid, &true, &100);
+        let result = client.try_vote(&voter, &pid, &true, &100);
+        assert_eq!(result, Err(Ok(GovernorError::AlreadyVoted)));
     }
 
     #[test]
@@ -557,27 +535,18 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
-        env.register(GovernorContract, ());
-        setup(&env);
+        let client = setup(&env);
 
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
         let executor = Address::generate(&env);
 
-        let pid = GovernorContract::propose(
-            env.clone(),
-            proposer,
-            String::from_str(&env, "P"),
-            String::from_str(&env, "D"),
-        )
-        .unwrap();
-
-        GovernorContract::vote(env.clone(), voter, pid, true, 200).unwrap();
+        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        client.vote(&voter, &pid, &true, &200);
         env.ledger().with_mut(|l| l.timestamp = 5000);
-        GovernorContract::finalize(env.clone(), pid).unwrap();
+        client.finalize(&pid);
 
-        // Try to execute immediately (timelock = 86400)
-        let result = GovernorContract::execute(env, executor, pid);
-        assert_eq!(result, Err(GovernorError::TimelockNotElapsed));
+        let result = client.try_execute(&executor, &pid);
+        assert_eq!(result, Err(Ok(GovernorError::TimelockNotElapsed)));
     }
 }
