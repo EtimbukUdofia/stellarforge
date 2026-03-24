@@ -10,7 +10,7 @@
 //! - Timelock between approval and execution
 //! - Anyone can propose; execution is permissionless once passed
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String};
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
@@ -490,7 +490,11 @@ mod tests {
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
 
-        let pid = client.propose(&proposer, &String::from_str(&env, "Test Proposal"), &String::from_str(&env, "A test"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Test Proposal"),
+            &String::from_str(&env, "A test"),
+        );
         client.vote(&voter, &pid, &true, &200);
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
@@ -506,7 +510,11 @@ mod tests {
         let client = setup(&env);
 
         let proposer = Address::generate(&env);
-        let pid = client.propose(&proposer, &String::from_str(&env, "Low vote"), &String::from_str(&env, "desc"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "Low vote"),
+            &String::from_str(&env, "desc"),
+        );
 
         let voter = Address::generate(&env);
         client.vote(&voter, &pid, &true, &50);
@@ -525,7 +533,11 @@ mod tests {
 
         let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
-        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
 
         client.vote(&voter, &pid, &true, &100);
         let result = client.try_vote(&voter, &pid, &true, &100);
@@ -572,7 +584,11 @@ mod tests {
         let client = setup(&env);
 
         let proposer = Address::generate(&env);
-        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
 
         // Vote with weight below quorum (quorum = 100)
         let voter = Address::generate(&env);
@@ -591,7 +607,11 @@ mod tests {
         let client = setup(&env);
 
         let proposer = Address::generate(&env);
-        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
 
         let voter = Address::generate(&env);
         client.vote(&voter, &pid, &true, &100);
@@ -609,7 +629,11 @@ mod tests {
         let client = setup(&env);
 
         let proposer = Address::generate(&env);
-        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
 
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid); // fails: no votes
@@ -628,6 +652,11 @@ mod tests {
 
         let proposer = Address::generate(&env);
         let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
 
         // Advance past voting_period (3600)
         env.ledger().with_mut(|l| l.timestamp = 5000);
@@ -648,7 +677,11 @@ mod tests {
         let voter = Address::generate(&env);
         let executor = Address::generate(&env);
 
-        let pid = client.propose(&proposer, &String::from_str(&env, "P"), &String::from_str(&env, "D"));
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "P"),
+            &String::from_str(&env, "D"),
+        );
         client.vote(&voter, &pid, &true, &200);
         env.ledger().with_mut(|l| l.timestamp = 5000);
         client.finalize(&pid);
