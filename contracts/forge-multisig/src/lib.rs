@@ -10,7 +10,7 @@
 //! - Owners can propose, approve, reject, and execute transactions
 //! - Native token support via Stellar token interface
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, Vec};
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
@@ -123,7 +123,9 @@ impl MultisigContract {
         if threshold == 0 || threshold > unique_owners.len() {
             return Err(MultisigError::InvalidThreshold);
         }
-        env.storage().instance().set(&DataKey::Owners, &unique_owners);
+        env.storage()
+            .instance()
+            .set(&DataKey::Owners, &unique_owners);
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
@@ -569,7 +571,9 @@ mod tests {
         client.initialize(&vec![&env, o1.clone(), o2.clone(), o3.clone()], &2, &3600);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let to = Address::generate(&env);
         soroban_sdk::token::StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
 
@@ -613,7 +617,9 @@ mod tests {
         client.initialize(&vec![&env, o1.clone(), o2.clone(), o3.clone()], &2, &3600);
 
         let token_admin = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         let to = Address::generate(&env);
         soroban_sdk::token::StellarAssetClient::new(&env, &token_id).mint(&contract_id, &500);
 
