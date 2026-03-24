@@ -1,14 +1,14 @@
-#![no_std]
+#! [no_std]
 
-//! # forge-stream
-//!
-//! Real-time token streaming — pay-per-second token transfers on Soroban.
-//!
-//! ## Overview
-//! - Sender creates a stream with a rate (tokens per second) and duration
-//! - Recipient can withdraw accrued tokens at any time
-//! - Sender can cancel and reclaim unstreamed tokens
-//! - Multiple streams can run in parallel (keyed by stream_id)
+ //! # forge-stream
+ //!
+ //! Real-time token streaming — pay-per-second token transfers on Soroban.
+ //!
+ //! ## Overview
+ //! - Sender creates a stream with a rate (tokens per second) and duration
+ //! - Recipient can withdraw accrued tokens at any time
+ //! - Sender can cancel and reclaim unstreamed tokens
+ //! - Multiple streams can run in parallel (keyed by stream_id)
 
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, token, Address, Env, Symbol};
 
@@ -71,13 +71,33 @@ pub struct ForgeStream;
 impl ForgeStream {
     /// Create a new token stream.
     ///
-    /// # Parameters
-    /// - `token`: Token contract address
-    /// - `recipient`: Address that receives streamed tokens
-    /// - `rate_per_second`: Tokens unlocked per second
-    /// - `duration_seconds`: How long the stream runs
+    /// Creates a stream that unlocks `rate_per_second * duration_seconds` total tokens over time.
+    /// Caller (`sender`) must authorize token transfer upfront for the full amount.
     ///
-    /// Returns the new stream ID.
+    /// # Parameters
+    /// - `sender`: Stream creator/funder (must authorize)
+    /// - `token`: Token contract Address
+    /// - `recipient`: Who receives withdrawn tokens
+    /// - `rate_per_second`: i128 > 0, tokens unlocked per ledger second
+    /// - `duration_seconds`: u64 > 0, stream length in seconds
+    ///
+    /// # Returns
+    /// u64: Unique stream ID
+    ///
+    /// # Example
+    /// ```
+    /// let stream_id = forge_stream.create_stream(
+    ///     env,
+    ///     sender,
+    ///     token,
+    ///     recipient,
+    ///     100i128,  // 100 tokens/sec
+    ///     3600u64,  // 1 hour = 360,000 total tokens
+    /// )?;
+    /// ```
+    ///
+    /// # Errors
+    /// - `InvalidConfig` if rate <= 0 or duration == 0
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -137,8 +157,30 @@ impl ForgeStream {
         Ok(stream_id)
     }
 
-    /// Withdraw all accrued tokens from a stream.
-    /// Only callable by the stream recipient.
+    /// Withdraw all currently accrued (streamed but unwithdrawn) tokens from a stream.
+    ///
+    /// Computes tokens accrued since `start_time` up to current ledger time (capped at `end_time`),
+    /// minus previously withdrawn amount. Transfers to `recipient`.
+    /// Only callable by the stream's `recipient`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: u64 stream identifier
+    ///
+    /// # Returns
+    /// i128: Amount withdrawn (or 0 if nothing accrued)
+    ///
+    /// # Example
+    /// ```
+    /// // After 10 seconds at 100/sec rate:
+    /// let withdrawn = forge_stream.withdraw(env, stream_id)?;
+    /// assert_eq!(withdrawn, 1000);  // 100 * 10
+    /// ```
+    ///
+    /// # Errors
+    /// - `StreamNotFound`
+    /// - `Unauthorized` (not recipient)
+    /// - `AlreadyCancelled`
+    /// - `NothingToWithdraw`
     pub fn withdraw(env: Env, stream_id: u64) -> Result<i128, StreamError> {
         let mut stream: Stream = env
             .storage()
@@ -180,8 +222,29 @@ impl ForgeStream {
         Ok(withdrawable)
     }
 
-    /// Cancel a stream. Unstreamed tokens are returned to sender.
-    /// Only callable by the stream sender.
+    /// Cancel an active stream. Immediately finalizes:
+    /// - Accrued tokens auto-paid to recipient
+    /// - Remaining unstreamed tokens refunded to sender
+    /// Stream becomes withdrawable=0 thereafter.
+    /// Only callable by the stream's `sender`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: u64 stream identifier
+    ///
+    /// # Returns
+    /// `Ok(())`
+    ///
+    /// # Example
+    /// ```
+    /// // Stream: 100/sec for 3600s, cancel after 100s:
+    /// // recipient gets 10,000 (100*100), sender refunded 350,000
+    /// forge_stream.cancel_stream(env, stream_id)?;
+    /// ```
+    ///
+    /// # Errors
+    /// - `StreamNotFound`
+    /// - `Unauthorized` (not sender)
+    /// - `AlreadyCancelled`
     pub fn cancel_stream(env: Env, stream_id: u64) -> Result<(), StreamError> {
         let mut stream: Stream = env
             .storage()
@@ -230,7 +293,29 @@ impl ForgeStream {
         Ok(())
     }
 
-    /// Get the current status of a stream.
+    /// Get real-time status of a stream without modifying it.
+    ///
+    /// Computes current `streamed`, `withdrawable`, `remaining` based on ledger timestamp.
+    ///
+    /// # Parameters
+    /// - `stream_id`: u64 stream identifier
+    ///
+    /// # Returns
+    /// `StreamStatus` with:
+    /// - `streamed`: Total accrued up to now
+    /// - `withdrawn`: Cumulative withdrawn
+    /// - `withdrawable`: streamed - withdrawn
+    /// - `remaining`: total - streamed
+    /// - `is_active`: !cancelled && now < end_time
+    /// - `is_finished`: now >= end_time
+    ///
+    /// # Example
+    /// ```
+    /// let status = forge_stream.get_stream_status(env, stream_id)?;
+    /// if status.withdrawable > 0 {
+    ///     forge_stream.withdraw(env, stream_id)?;
+    /// }
+    /// ```
     pub fn get_stream_status(env: Env, stream_id: u64) -> Result<StreamStatus, StreamError> {
         let stream: Stream = env
             .storage()
@@ -257,7 +342,25 @@ impl ForgeStream {
         })
     }
 
-    /// Get full stream data.
+    /// Get the complete internal stream configuration and state.
+    ///
+    /// Returns the full `Stream` struct including private fields like `cancelled`.
+    /// Useful for admin/UI display.
+    ///
+    /// # Parameters
+    /// - `stream_id`: u64 stream identifier
+    ///
+    /// # Returns
+    /// `Stream` struct
+    ///
+    /// # Example
+    /// ```
+    /// let stream = forge_stream.get_stream(env, stream_id)?;
+    /// assert_eq!(stream.rate_per_second, 100i128);
+    /// ```
+    ///
+    /// # Errors
+    /// - `StreamNotFound`
     pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
         env.storage()
             .instance()
@@ -281,10 +384,8 @@ impl ForgeStream {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        Env,
-    };
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::Env;
 
     #[test]
     fn test_create_stream_success() {
@@ -397,3 +498,4 @@ mod tests {
         assert_eq!(status.streamed, 100_000); // 100 * 1000s = full amount
     }
 }
+
