@@ -165,27 +165,35 @@ impl ForgeStream {
             .instance()
             .set(&DataKey::NextId, &(stream_id + 1));
 
-        // Store sender → stream ID mapping
+        // Store sender → stream ID mapping in persistent storage
         let mut sender_streams: soroban_sdk::Vec<u64> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::SenderStreams(sender.clone()))
             .unwrap_or(soroban_sdk::Vec::new(&env));
         sender_streams.push_back(stream_id);
         env.storage()
-            .instance()
-            .set(&DataKey::SenderStreams(sender), &sender_streams);
+            .persistent()
+            .set(&DataKey::SenderStreams(sender.clone()), &sender_streams);
+        // Extend TTL for sender streams mapping
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::SenderStreams(sender), 17280, 34560);
 
-        // Store recipient → stream ID mapping
+        // Store recipient → stream ID mapping in persistent storage
         let mut recipient_streams: soroban_sdk::Vec<u64> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::RecipientStreams(recipient.clone()))
             .unwrap_or(soroban_sdk::Vec::new(&env));
         recipient_streams.push_back(stream_id);
         env.storage()
-            .instance()
-            .set(&DataKey::RecipientStreams(recipient), &recipient_streams);
+            .persistent()
+            .set(&DataKey::RecipientStreams(recipient.clone()), &recipient_streams);
+        // Extend TTL for recipient streams mapping
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::RecipientStreams(recipient), 17280, 34560);
 
         Self::set_active_streams_count(&env, Self::active_streams_count(&env).saturating_add(1));
 
@@ -603,10 +611,16 @@ impl ForgeStream {
     /// }
     /// ```
     pub fn get_streams_by_sender(env: Env, sender: Address) -> soroban_sdk::Vec<u64> {
+        let result = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SenderStreams(sender.clone()))
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        // Extend TTL on read to keep the mapping alive
         env.storage()
-            .instance()
-            .get(&DataKey::SenderStreams(sender))
-            .unwrap_or(soroban_sdk::Vec::new(&env))
+            .persistent()
+            .extend_ttl(&DataKey::SenderStreams(sender), 17280, 34560);
+        result
     }
 
     /// Get all stream IDs for a given recipient.
@@ -631,10 +645,16 @@ impl ForgeStream {
     /// }
     /// ```
     pub fn get_streams_by_recipient(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
+        let result = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecipientStreams(recipient.clone()))
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        // Extend TTL on read to keep the mapping alive
         env.storage()
-            .instance()
-            .get(&DataKey::RecipientStreams(recipient))
-            .unwrap_or(soroban_sdk::Vec::new(&env))
+            .persistent()
+            .extend_ttl(&DataKey::RecipientStreams(recipient), 17280, 34560);
+        result
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
@@ -814,6 +834,49 @@ mod tests {
         // No time has passed — nothing to withdraw
         let result = client.try_withdraw(&stream_id);
         assert_eq!(result, Err(Ok(StreamError::NothingToWithdraw)));
+    }
+
+    /// Test for issue #215: Double withdraw() should return NothingToWithdraw on second call.
+    /// Verifies that withdrawn is updated correctly and the second call without time passing returns error.
+    #[test]
+    fn test_double_withdraw_returns_nothing_to_withdraw() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        let sac = StellarAssetClient::new(&env, &token_id);
+        sac.mint(&sender, &10_000_000i128);
+        let token = TokenClient::new(&env, &token_id);
+
+        let stream_id = client.create_stream(&sender, &token.address, &recipient, &100, &1000);
+        
+        // Advance time by 100 seconds so tokens accrue
+        env.ledger().with_mut(|l| l.timestamp += 100);
+        
+        // First withdraw should succeed and return 100 * 100 = 10,000
+        let withdrawn_amount = client.withdraw(&stream_id);
+        assert_eq!(withdrawn_amount, 10_000);
+        
+        // Verify stream status after first withdrawal
+        let status_after_first = client.get_stream_status(&stream_id);
+        assert_eq!(status_after_first.withdrawn, 10_000);
+        assert_eq!(status_after_first.withdrawable, 0);
+        
+        // Second withdraw without advancing time should fail with NothingToWithdraw
+        let result = client.try_withdraw(&stream_id);
+        assert_eq!(result, Err(Ok(StreamError::NothingToWithdraw)));
+        
+        // Verify stream status hasn't changed
+        let status_after_second = client.get_stream_status(&stream_id);
+        assert_eq!(status_after_second.withdrawn, 10_000);
+        assert_eq!(status_after_second.withdrawable, 0);
     }
 
     #[test]
@@ -1595,6 +1658,10 @@ mod tests {
         assert_eq!(status_after.withdrawable, 0, "withdrawable should be 0 after cancel");
     }
 
+    /// Test for issue #214: Creating 20+ streams for a single sender should not overflow.
+    /// Verifies that get_streams_by_sender() returns all stream IDs correctly when using persistent storage.
+    #[test]
+    fn test_get_streams_by_sender_many_streams() {
     /// Test cancelling a paused stream correctly splits tokens.
     /// When a stream is paused and then cancelled, only the active (non-paused) time counts.
     /// Recipient receives tokens for active time, sender receives the rest.
@@ -1605,6 +1672,35 @@ mod tests {
         let contract_id = env.register_contract(None, ForgeStream);
         let client = ForgeStreamClient::new(&env, &contract_id);
         let sender = Address::generate(&env);
+        
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+        // Fund sender with enough tokens for 25 streams of 100 tokens/sec for 1000 seconds each
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &2_500_000_000i128);
+
+        let mut stream_ids = Vec::new();
+        
+        // Create 25 streams with different recipients
+        for i in 0..25 {
+            let recipient = Address::generate(&env);
+            let stream_id = client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+            stream_ids.push(stream_id);
+        }
+
+        // Retrieve all streams for the sender
+        let sender_streams = client.get_streams_by_sender(&sender);
+        
+        // Verify all 25 streams are returned
+        assert_eq!(sender_streams.len(), 25, "Expected 25 streams for sender");
+        
+        // Verify each stream ID is in the returned list
+        for (i, expected_id) in stream_ids.iter().enumerate() {
+            assert_eq!(
+                sender_streams.get(i as u32).unwrap(),
+                *expected_id,
+                "Stream ID at index {} does not match", i
+            );
+        }
         let recipient = Address::generate(&env);
 
         let token_admin = Address::generate(&env);

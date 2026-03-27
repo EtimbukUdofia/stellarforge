@@ -263,6 +263,10 @@ impl MultisigContract {
         proposal.approvals.push_back(owner.clone());
 
         let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        // The is_none() guard ensures approved_at is set only once, when the threshold is first reached.
+        // This prevents the timelock countdown from being reset if threshold changes in the future.
+        // Currently, owners and threshold are immutable after initialize(), but this guard protects
+        // against accidental resets if threshold mutability is added later.
         if proposal.approvals.len() >= threshold && proposal.approved_at.is_none() {
             proposal.approved_at = Some(env.ledger().timestamp());
         }
@@ -1289,6 +1293,45 @@ mod tests {
                     .unwrap_or(false)
         });
         assert!(found, "Expected proposal_created event not found");
+    }
+
+    /// Test for issue #213: In a 1-of-3 multisig, approved_at is set during propose()
+    /// (when proposer's auto-approval meets threshold) and is not overwritten by subsequent approve() calls.
+    #[test]
+    fn test_1of3_approved_at_set_at_propose_not_overwritten() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+
+        let (client, o1, o2, o3) = setup_1of3_funded(&env);
+        let token = Address::generate(&env);
+        let to = Address::generate(&env);
+
+        // propose() auto-approves proposer; threshold=1 is met immediately
+        let pid = client.propose(&o1, &to, &token, &100);
+        let proposal_after_propose = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal_after_propose.approvals.len(), 1);
+        let approved_at_from_propose = proposal_after_propose.approved_at;
+        assert_eq!(approved_at_from_propose, Some(1000));
+
+        // Advance time and have another owner approve
+        env.ledger().with_mut(|l| l.timestamp = 2000);
+        client.approve(&o2, &pid);
+
+        // Verify approved_at was NOT overwritten
+        let proposal_after_approve = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal_after_approve.approvals.len(), 2);
+        assert_eq!(
+            proposal_after_approve.approved_at, approved_at_from_propose,
+            "approved_at must not be overwritten by subsequent approve()"
+        );
+        assert_eq!(proposal_after_approve.approved_at, Some(1000));
+
+        // Verify a third approval also doesn't change approved_at
+        env.ledger().with_mut(|l| l.timestamp = 3000);
+        client.approve(&o3, &pid);
+        let proposal_after_third_approve = client.get_proposal(&pid).unwrap();
+        assert_eq!(proposal_after_third_approve.approved_at, Some(1000));
     }
 
     /// Test that approve() emits a proposal_approved event with correct payload
