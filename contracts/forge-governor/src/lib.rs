@@ -137,6 +137,7 @@ impl GovernorContract {
             return Err(GovernorError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().extend_ttl(17280, 34560);
         Ok(())
     }
 
@@ -201,6 +202,7 @@ impl GovernorContract {
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(proposal_id)
     }
@@ -270,6 +272,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(())
     }
@@ -315,7 +318,11 @@ impl GovernorContract {
             return Err(GovernorError::VotingStillOpen);
         }
 
-        let config: GovernorConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let config: GovernorConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(GovernorError::NotInitialized)?;
         let total_votes = proposal.votes_for + proposal.votes_against;
 
         if total_votes >= config.quorum && proposal.votes_for > proposal.votes_against {
@@ -329,6 +336,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(state)
     }
@@ -374,8 +382,14 @@ impl GovernorContract {
             return Err(GovernorError::ProposalNotPassed);
         }
 
-        let passed_at = proposal.passed_at.unwrap();
-        let config: GovernorConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let passed_at = proposal
+            .passed_at
+            .ok_or(GovernorError::ProposalNotPassed)?;
+        let config: GovernorConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(GovernorError::NotInitialized)?;
 
         if env.ledger().timestamp() < passed_at + config.timelock_delay {
             return Err(GovernorError::TimelockNotElapsed);
@@ -385,6 +399,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(())
     }
@@ -747,7 +762,7 @@ mod tests {
         client.vote(&voter4, &pid2, &true, &39);
 
         // Finalize after the voting period and verify it fails.
-        env.ledger().with_mut(|l| l.timestamp = 6000);
+        env.ledger().with_mut(|l| l.timestamp = 10000);
         let state2 = client.finalize(&pid2);
         assert_eq!(state2, ProposalState::Failed);
     }
@@ -876,8 +891,7 @@ mod tests {
 
         // Ensure execution succeeds after the timelock delay elapsed
         env.ledger().with_mut(|l| l.timestamp = 5000 + 86400);
-        let result = client.execute(&executor, &pid);
-        assert_eq!(result, Ok(()));
+        client.execute(&executor, &pid);
 
         let proposal = client.get_proposal(&pid);
         assert_eq!(proposal.state, ProposalState::Executed);
@@ -1043,5 +1057,78 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending.get(0).unwrap(), pid1);
         assert_eq!(pending.get(1).unwrap(), pid2);
+    }
+
+    // ── NotInitialized safety tests ───────────────────────────────────────────
+
+    /// finalize() must return NotInitialized (not panic) when DataKey::Config is
+    /// absent from instance storage — simulated by an uninitialized contract with
+    /// a manually injected proposal.
+    #[test]
+    fn test_finalize_returns_not_initialized_when_config_missing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+
+        // Register contract but do NOT call initialize()
+        let contract_id = env.register_contract(None, GovernorContract);
+        let client = GovernorContractClient::new(&env, &contract_id);
+
+        // Manually store a proposal that looks Active and past its vote_end
+        // so finalize() gets past the early guards and reaches the Config read.
+        let fake_proposal = Proposal {
+            proposer: Address::generate(&env),
+            title: String::from_str(&env, "T"),
+            description: String::from_str(&env, "D"),
+            vote_start: 0,
+            vote_end: 0, // already ended
+            votes_for: 1000,
+            votes_against: 0,
+            passed_at: None,
+            state: ProposalState::Active,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(0u64), &fake_proposal);
+        });
+
+        env.ledger().with_mut(|l| l.timestamp = 100);
+        let result = client.try_finalize(&0);
+        assert_eq!(result, Err(Ok(GovernorError::NotInitialized)));
+    }
+
+    /// execute() must return NotInitialized (not panic) when DataKey::Config is
+    /// absent from instance storage.
+    #[test]
+    fn test_execute_returns_not_initialized_when_config_missing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let contract_id = env.register_contract(None, GovernorContract);
+        let client = GovernorContractClient::new(&env, &contract_id);
+
+        // Inject a Passed proposal with passed_at set so execute() reaches the Config read.
+        let fake_proposal = Proposal {
+            proposer: Address::generate(&env),
+            title: String::from_str(&env, "T"),
+            description: String::from_str(&env, "D"),
+            vote_start: 0,
+            vote_end: 0,
+            votes_for: 1000,
+            votes_against: 0,
+            passed_at: Some(0),
+            state: ProposalState::Passed,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(0u64), &fake_proposal);
+        });
+
+        let executor = Address::generate(&env);
+        let result = client.try_execute(&executor, &0);
+        assert_eq!(result, Err(Ok(GovernorError::NotInitialized)));
     }
 }

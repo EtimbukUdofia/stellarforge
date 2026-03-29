@@ -132,6 +132,7 @@ impl MultisigContract {
         env.storage()
             .instance()
             .set(&DataKey::TimelockDelay, &timelock_delay);
+        env.storage().instance().extend_ttl(17280, 34560);
         Ok(())
     }
 
@@ -181,7 +182,11 @@ impl MultisigContract {
         let mut approvals = Vec::new(&env);
         approvals.push_back(proposer.clone());
 
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(MultisigError::NotInitialized)?;
         let approved_at = if approvals.len() >= threshold {
             Some(env.ledger().timestamp())
         } else {
@@ -206,6 +211,7 @@ impl MultisigContract {
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(proposal_id)
     }
@@ -257,7 +263,11 @@ impl MultisigContract {
 
         proposal.approvals.push_back(owner);
 
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(MultisigError::NotInitialized)?;
         if proposal.approvals.len() >= threshold && proposal.approved_at.is_none() {
             proposal.approved_at = Some(env.ledger().timestamp());
         }
@@ -265,6 +275,7 @@ impl MultisigContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(())
     }
@@ -386,6 +397,7 @@ impl MultisigContract {
             &proposal.to,
             &proposal.amount,
         );
+        env.storage().instance().extend_ttl(17280, 34560);
 
         Ok(())
     }
@@ -1038,6 +1050,8 @@ mod tests {
 
         let result = client.try_propose(&non_owner, &recipient, &token_id, &100);
         assert_eq!(result, Err(Ok(MultisigError::Unauthorized)));
+    }
+
     // ── Non-owner propose() rejection ─────────────────────────────────────────
 
     #[test]
@@ -1086,5 +1100,54 @@ mod tests {
         assert!(client.get_proposal(&0).is_none());
         // Approval count for a non-existent proposal returns 0
         assert_eq!(client.get_approval_count(&0), 0);
+    }
+
+    // ── NotInitialized safety tests ───────────────────────────────────────────
+
+    /// propose() must return NotInitialized (not panic) when instance storage
+    /// has no Threshold key — simulated by calling on an uninitialized contract.
+    #[test]
+    fn test_propose_returns_not_initialized_when_storage_missing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let to = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        // Contract is not initialized — propose() must return NotInitialized,
+        // not trap with an unrecoverable panic.
+        let result = client.try_propose(&owner, &to, &token, &500);
+        // require_owner reads Owners and returns NotInitialized when missing
+        assert_eq!(result, Err(Ok(MultisigError::NotInitialized)));
+    }
+
+    /// approve() must return NotInitialized (not panic) when instance storage
+    /// has no Threshold key — simulated by calling on an uninitialized contract.
+    #[test]
+    fn test_approve_returns_not_initialized_when_storage_missing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+
+        let result = client.try_approve(&owner, &0);
+        assert_eq!(result, Err(Ok(MultisigError::NotInitialized)));
+    }
+
+    /// execute() must return NotInitialized (not panic) when instance storage
+    /// has no TimelockDelay key — simulated by calling on an uninitialized contract.
+    #[test]
+    fn test_execute_returns_not_initialized_when_storage_missing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+
+        let result = client.try_execute(&owner, &0);
+        assert_eq!(result, Err(Ok(MultisigError::NotInitialized)));
     }
 }
