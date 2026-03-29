@@ -697,6 +697,77 @@ impl ForgeStream {
         result
     }
 
+    /// Extend an active stream by adding more time and tokens.
+    ///
+    /// Transfers `rate_per_second * additional_seconds` tokens from the sender to the
+    /// contract and pushes `end_time` forward by `additional_seconds`. The stream must
+    /// not be cancelled and must not have already finished.
+    /// Only callable by the stream's `sender`.
+    ///
+    /// # Parameters
+    /// - `stream_id`: u64 stream identifier
+    /// - `additional_seconds`: u64 > 0, seconds to add to the stream duration
+    ///
+    /// # Returns
+    /// `Ok(())`
+    ///
+    /// # Errors
+    /// - `StreamNotFound` — no stream exists with `stream_id`
+    /// - `Unauthorized` — caller is not the stream sender
+    /// - `AlreadyCancelled` — stream has been cancelled
+    /// - `StreamFinished` — stream end_time has already passed
+    /// - `InvalidConfig` — `additional_seconds` is 0
+    pub fn extend_stream(
+        env: Env,
+        stream_id: u64,
+        additional_seconds: u64,
+    ) -> Result<(), StreamError> {
+        if additional_seconds == 0 {
+            return Err(StreamError::InvalidConfig);
+        }
+
+        Self::validate_stream_id(&env, stream_id)?;
+        let mut stream: Stream = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Stream(stream_id))
+            .ok_or(StreamError::StreamNotFound)?;
+
+        if stream.cancelled {
+            return Err(StreamError::AlreadyCancelled);
+        }
+
+        stream.sender.require_auth();
+
+        if env.ledger().timestamp() >= stream.end_time {
+            return Err(StreamError::StreamFinished);
+        }
+
+        let additional_tokens = stream.rate_per_second * additional_seconds as i128;
+        let token_client = token::Client::new(&env, &stream.token);
+        token_client.transfer(
+            &stream.sender,
+            &env.current_contract_address(),
+            &additional_tokens,
+        );
+
+        stream.end_time += additional_seconds;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Stream(stream_id), &stream);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Stream(stream_id), 17280, 34560);
+
+        env.events().publish(
+            (Symbol::new(&env, "stream_extended"),),
+            (stream_id, stream.end_time, additional_tokens),
+        );
+
+        Ok(())
+    }
+
     // ── Private ───────────────────────────────────────────────────────────────
 
     /// Validate that a stream ID is within the valid range.
@@ -2251,5 +2322,133 @@ mod tests {
         // Out of range ID should fail
         let result = client.try_get_stream(&2);
         assert!(result.is_err(), "Expected error for out-of-range stream ID");
+    }
+
+    // ── extend_stream tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_extend_stream_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        // Mint enough for original stream (100 * 1000 = 100_000) + extension (100 * 500 = 50_000)
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &150_000i128);
+
+        let stream_id = client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+        let stream_before = client.get_stream(&stream_id);
+        assert_eq!(stream_before.end_time, 1000);
+
+        client.extend_stream(&stream_id, &500);
+
+        let stream_after = client.get_stream(&stream_id);
+        assert_eq!(stream_after.end_time, 1500);
+    }
+
+    #[test]
+    fn test_extend_stream_increases_remaining() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &200_000i128);
+
+        let stream_id = client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+
+        let status_before = client.get_stream_status(&stream_id);
+        // At t=0, remaining = 100 * 1000 = 100_000
+        assert_eq!(status_before.remaining, 100_000);
+
+        client.extend_stream(&stream_id, &500);
+
+        let status_after = client.get_stream_status(&stream_id);
+        // After extension, remaining = 100 * 1500 = 150_000
+        assert_eq!(status_after.remaining, 150_000);
+    }
+
+    #[test]
+    fn test_extend_stream_cancelled_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &200_000i128);
+
+        let stream_id = client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+        client.cancel_stream(&stream_id);
+
+        let result = client.try_extend_stream(&stream_id, &500);
+        assert_eq!(result, Err(Ok(StreamError::AlreadyCancelled)));
+    }
+
+    #[test]
+    fn test_extend_stream_after_end_time_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &200_000i128);
+
+        let stream_id = client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+
+        // Advance past end_time
+        env.ledger().with_mut(|l| l.timestamp = 1001);
+
+        let result = client.try_extend_stream(&stream_id, &500);
+        assert_eq!(result, Err(Ok(StreamError::StreamFinished)));
+    }
+
+    #[test]
+    fn test_extend_stream_zero_seconds_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &100_000i128);
+
+        let stream_id = client.create_stream(&sender, &token_id, &recipient, &100, &1000);
+
+        let result = client.try_extend_stream(&stream_id, &0);
+        assert_eq!(result, Err(Ok(StreamError::InvalidConfig)));
     }
 }
