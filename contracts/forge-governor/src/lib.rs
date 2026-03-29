@@ -166,6 +166,7 @@ impl GovernorContract {
             return Err(GovernorError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().extend_ttl(17280, 34560);
         Ok(())
     }
 
@@ -230,6 +231,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
+        env.storage().instance().extend_ttl(17280, 34560);
 
         // Track active proposal ID for O(1) get_pending_proposals
         let mut active: Vec<u64> = env
@@ -332,6 +334,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         env.events().publish(
             (Symbol::new(&env, "vote_cast"),),
@@ -382,7 +385,11 @@ impl GovernorContract {
             return Err(GovernorError::VotingStillOpen);
         }
 
-        let config: GovernorConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let config: GovernorConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(GovernorError::NotInitialized)?;
         let total_votes = proposal.votes_for + proposal.votes_against;
 
         if total_votes >= config.quorum && proposal.votes_for > proposal.votes_against {
@@ -396,6 +403,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         // Remove from active proposals list
         let mut active: Vec<u64> = env
@@ -462,8 +470,14 @@ impl GovernorContract {
             return Err(GovernorError::ProposalNotPassed);
         }
 
-        let passed_at = proposal.passed_at.unwrap();
-        let config: GovernorConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let passed_at = proposal
+            .passed_at
+            .ok_or(GovernorError::ProposalNotPassed)?;
+        let config: GovernorConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(GovernorError::NotInitialized)?;
 
         if env.ledger().timestamp() < passed_at + config.timelock_delay {
             return Err(GovernorError::TimelockNotElapsed);
@@ -473,6 +487,7 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         // Remove from active proposals list (in case finalize was skipped)
         let mut active: Vec<u64> = env

@@ -311,6 +311,7 @@ impl MultisigContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage().instance().extend_ttl(17280, 34560);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_approved"),),
@@ -458,6 +459,7 @@ impl MultisigContract {
             &proposal.to,
             &proposal.amount,
         );
+        env.storage().instance().extend_ttl(17280, 34560);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_executed"),),
