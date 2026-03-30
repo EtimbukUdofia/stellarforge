@@ -562,17 +562,21 @@ impl ForgeVesting {
     /// amounts, timing parameters, and cancellation status. Read-only; does not
     /// modify state.
     ///
+    /// # Deprecation Notice
+    ///
+    /// **Prefer [`get_vesting_schedule`] and [`get_status`] for public-facing reads.**
+    /// `get_config` exposes the admin address and internal cancellation flag, which
+    /// may be a privacy concern in some deployments. Use the alternatives instead:
+    /// - [`get_vesting_schedule`] — token, beneficiary, amounts, and timing (no admin)
+    /// - [`get_status`] — claimable amount, vested amount, cliff status, and pause state
+    ///
+    /// `get_config` is retained for admin tooling and backward compatibility.
+    ///
     /// # Returns
     /// `Ok(`[`VestingConfig`]`)` with the stored configuration.
     ///
     /// # Errors
     /// - [`VestingError::NotInitialized`] — `initialize` has not been called.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let config = client.get_config();
-    /// println!("Beneficiary: {:?}", config.beneficiary);
-    /// ```rust,ignore
     pub fn get_config(env: Env) -> Result<VestingConfig, VestingError> {
         env.storage()
             .instance()
@@ -891,6 +895,32 @@ mod tests {
         let client = ForgeVestingClient::new(&env, &contract_id);
         let result = client.try_get_vesting_schedule();
         assert_eq!(result, Err(Ok(VestingError::NotInitialized)));
+    }
+
+    #[test]
+    fn test_schedule_and_status_provide_full_ui_info_without_get_config() {
+        // get_vesting_schedule() + get_status() together expose everything a UI
+        // needs: token, beneficiary, amounts, timing, claimable — without
+        // leaking the admin address or internal cancellation flag.
+        let (env, contract_id, token, beneficiary, admin) = setup();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+        client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
+
+        // Advance past cliff
+        env.ledger().with_mut(|l| l.timestamp += 500);
+
+        let schedule = client.get_vesting_schedule();
+        assert_eq!(schedule.token, token);
+        assert_eq!(schedule.beneficiary, beneficiary);
+        assert_eq!(schedule.total_amount, 1_000_000);
+        assert_eq!(schedule.cliff_seconds, 100);
+        assert_eq!(schedule.duration_seconds, 1000);
+
+        let status = client.get_status();
+        assert!(status.cliff_reached);
+        assert!(status.claimable > 0);
+        assert_eq!(status.claimed, 0);
+        assert!(!status.fully_vested);
     }
 
     #[test]

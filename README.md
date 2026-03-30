@@ -64,6 +64,10 @@ Deploy tokens on a vesting schedule with an optional cliff period. Perfect for t
 * **Key Function:** `initialize(token, beneficiary, admin, total_amount, cliff_seconds, duration_seconds)`
 * **Action:** `claim()` withdraws all currently unlocked tokens.
 * **Security:** `cancel()` allows the admin to return unvested tokens if a contributor leaves.
+* **Read functions:** Three query functions serve different audiences:
+  * `get_vesting_schedule()` — public-facing; returns token, beneficiary, amounts, and timing. No admin address or cancellation state.
+  * `get_status()` — public-facing; returns claimable amount, vested amount, cliff status, and pause state.
+  * `get_config()` — admin tooling only; returns the full internal config including admin address and cancellation flag. Prefer the two functions above for UI integrations.
 
 ### forge-stream
 Pay-per-second token streams. Ideal for payroll, subscriptions, or real-time contractor payments.
