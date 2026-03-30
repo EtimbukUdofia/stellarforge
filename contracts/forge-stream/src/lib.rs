@@ -127,7 +127,7 @@ impl ForgeStream {
     ///     100i128,  // 100 tokens/sec
     ///     3600u64,  // 1 hour = 360,000 total tokens
     /// )?;
-    /// ```rust,ignore
+    /// ```
     ///
     /// # Errors
     /// - `InvalidConfig` if rate <= 0 or duration == 0
@@ -249,7 +249,7 @@ impl ForgeStream {
     /// // After 10 seconds at 100/sec rate:
     /// let withdrawn = forge_stream.withdraw(env, stream_id)?;
     /// assert_eq!(withdrawn, 1000);  // 100 * 10
-    /// ```rust,ignore
+    /// ```
     ///
     /// # Errors
     /// - `StreamNotFound`
@@ -325,7 +325,7 @@ impl ForgeStream {
     /// // effective elapsed = 300 - 200 paused = 100s → streamed = 10,000
     /// // recipient gets 10,000, sender refunded 350,000
     /// // Invariant: withdrawable + returnable == total (360,000)
-    /// ```rust,ignore
+    /// ```
     ///
     /// # Errors
     /// - `StreamNotFound`
@@ -614,7 +614,7 @@ impl ForgeStream {
     /// ```rust,ignore
     /// let stream = forge_stream.get_stream(env, stream_id)?;
     /// assert_eq!(stream.rate_per_second, 100i128);
-    /// ```rust,ignore
+    /// ```
     ///
     /// # Errors
     /// - `StreamNotFound`

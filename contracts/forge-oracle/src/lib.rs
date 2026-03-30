@@ -94,6 +94,13 @@ impl ForgeOracle {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(OracleError::AlreadyInitialized);
         }
+        // require_auth() here ensures the caller controls the admin key they are
+        // registering. This is NOT a pre-approval check — initialization is
+        // permissionless, so any caller can supply any address as admin as long as
+        // they can sign for it. Front-running risk: a malicious actor who observes
+        // this transaction in the mempool could race to call initialize() first with
+        // their own admin address. Deploy and initialize in the same transaction to
+        // mitigate this risk.
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -636,6 +643,36 @@ mod tests {
         let (admin, client) = setup(&env);
         let result = client.try_initialize(&admin, &3600);
         assert_eq!(result, Err(Ok(OracleError::AlreadyInitialized)));
+    }
+
+    /// Verifies that passing a third-party address as admin without that address's
+    /// signature causes initialize() to revert. require_auth() on a caller-supplied
+    /// address means the signer must control that address — you cannot nominate
+    /// someone else as admin without their key.
+    #[test]
+    fn test_initialize_admin_must_sign_for_supplied_address() {
+        use soroban_sdk::IntoVal;
+        let env = Env::default();
+        let contract_id = env.register_contract(None, ForgeOracle);
+        let client = ForgeOracleClient::new(&env, &contract_id);
+
+        let caller = Address::generate(&env);
+        let third_party = Address::generate(&env);
+
+        // Caller signs for themselves but passes third_party as admin.
+        // require_auth() on third_party will fail because caller did not sign for it.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &caller,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "initialize",
+                args: (&third_party, 3600u64).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_initialize(&third_party, &3600);
+        assert!(result.is_err(), "initialize must revert when signer does not control the admin address");
     }
 
     #[test]

@@ -138,7 +138,7 @@ impl ForgeVesting {
     /// ```rust,ignore
     /// // Vest 1 000 000 tokens over 1000 s with a 100 s cliff.
     /// client.initialize(&token, &beneficiary, &admin, &1_000_000, &100, &1000);
-    /// ```rust,ignore
+    /// ```
     pub fn initialize(
         env: Env,
         token: Address,
@@ -207,7 +207,7 @@ impl ForgeVesting {
     /// ```rust,ignore
     /// // After the cliff has passed:
     /// let claimed = client.claim(); // returns tokens vested so far
-    /// ```rust,ignore
+    /// ```
     pub fn claim(env: Env) -> Result<i128, VestingError> {
         let config: VestingConfig = env
             .storage()
@@ -276,7 +276,7 @@ impl ForgeVesting {
     /// ```rust,ignore
     /// // Admin decides to terminate the schedule early:
     /// client.cancel(); // unvested tokens are returned to admin
-    /// ```rust,ignore
+    /// ```
     pub fn cancel(env: Env) -> Result<(), VestingError> {
         let mut config: VestingConfig = env
             .storage()
@@ -419,7 +419,7 @@ impl ForgeVesting {
     /// ```rust,ignore
     /// // Transfer admin rights to a new multisig:
     /// client.transfer_admin(&new_admin_address);
-    /// ```rust,ignore
+    /// ```
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), VestingError> {
         let mut config: VestingConfig = env
             .storage()
@@ -469,7 +469,7 @@ impl ForgeVesting {
     /// ```rust,ignore
     /// // Transfer beneficiary rights to a new wallet:
     /// client.change_beneficiary(&new_beneficiary_address);
-    /// ```rust,ignore
+    /// ```
     pub fn change_beneficiary(env: Env, new_beneficiary: Address) -> Result<(), VestingError> {
         let mut config: VestingConfig = env
             .storage()
@@ -522,7 +522,7 @@ impl ForgeVesting {
     /// if status.cliff_reached {
     ///     println!("Claimable: {}", status.claimable);
     /// }
-    /// ```rust,ignore
+    /// ```
     pub fn get_status(env: Env) -> Result<VestingStatus, VestingError> {
         let config: VestingConfig = env
             .storage()
@@ -1711,6 +1711,20 @@ mod tests {
     /// claim() must succeed when called exactly at the cliff timestamp.
     #[test]
     fn test_claim_exactly_at_cliff_succeeds() {
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &500, &1000);
+
+        // elapsed = 500 → exactly at cliff
+        env.ledger().with_mut(|l| l.timestamp = 500);
+        let result = client.try_claim();
+        assert!(result.is_ok());
+        // 500/1000 * 1_000_000 = 500_000 vested at cliff
+        assert_eq!(result.unwrap(), Ok(500_000));
+    }
+
     /// Tests that claim() returns the correct proportional amount at 25%, 50%, 75%,
     /// and 100% of the vesting duration, and that cumulative claimed never exceeds
     /// total_amount. Uses a cliff at 25% of duration to also verify cliff boundary.
@@ -1724,31 +1738,6 @@ mod tests {
         let client = ForgeVestingClient::new(&env, &contract_id);
 
         env.ledger().with_mut(|l| l.timestamp = 0);
-        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &500, &1000);
-
-        // elapsed = 500 → exactly at cliff
-        env.ledger().with_mut(|l| l.timestamp = 500);
-        let result = client.try_claim();
-        assert!(result.is_ok());
-        // 500/1000 * 1_000_000 = 500_000 vested at cliff
-        assert_eq!(result.unwrap(), 500_000);
-    }
-
-    /// claim() must succeed one second after the cliff.
-    #[test]
-    fn test_claim_one_second_after_cliff_succeeds() {
-        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
-        let client = ForgeVestingClient::new(&env, &contract_id);
-
-        env.ledger().with_mut(|l| l.timestamp = 0);
-        client.initialize(&token_id, &beneficiary, &admin, &1_000_000, &500, &1000);
-
-        // elapsed = 501 → one second after cliff
-        env.ledger().with_mut(|l| l.timestamp = 501);
-        let result = client.try_claim();
-        assert!(result.is_ok());
-        // 501/1000 * 1_000_000 = 501_000 vested
-        assert_eq!(result.unwrap(), 501_000);
         client.initialize(&token_id, &beneficiary, &admin, &TOTAL, &CLIFF, &DURATION);
 
         // 25% — exactly at cliff: 250/1000 * 1_000_000 = 250_000 vested
