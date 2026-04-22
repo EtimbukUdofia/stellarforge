@@ -1700,6 +1700,7 @@ mod tests {
     #[test]
     fn test_propose_emits_event() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         let (client, o1, _, _) = setup_2of3(&env);
@@ -1732,7 +1733,7 @@ mod tests {
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 1000);
 
-        let (client, o1, o2, o3) = setup_1of3_funded(&env);
+        let (client, o1, o2, o3, _, _) = setup_1of3_funded(&env);
         let token = Address::generate(&env);
         let to = Address::generate(&env);
 
@@ -1767,6 +1768,7 @@ mod tests {
     #[test]
     fn test_approve_emits_event() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         let (client, o1, o2, _) = setup_2of3(&env);
@@ -1794,6 +1796,7 @@ mod tests {
     #[test]
     fn test_reject_emits_event() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         let (client, o1, o2, _) = setup_2of3(&env);
@@ -1822,7 +1825,7 @@ mod tests {
     fn test_reject_on_cancelled_proposal_reverts() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, o1, o2, o3) = setup_2of3(&env);
+        let (client, o1, o2, _o3) = setup_2of3(&env);
         let token = Address::generate(&env);
         let to = Address::generate(&env);
 
@@ -1845,7 +1848,7 @@ mod tests {
     fn test_proposer_can_cancel_own_proposal() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, o1, o2, o3) = setup_2of3(&env);
+        let (client, o1, _o2, _o3) = setup_2of3(&env);
         let token = Address::generate(&env);
         let to = Address::generate(&env);
 
@@ -1888,7 +1891,7 @@ mod tests {
     fn test_non_proposer_cannot_cancel_active_proposal() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, o1, o2, o3) = setup_2of3(&env);
+        let (client, o1, o2, _o3) = setup_2of3(&env);
         let token = Address::generate(&env);
         let to = Address::generate(&env);
 
@@ -1908,7 +1911,7 @@ mod tests {
     fn test_cancel_already_cancelled_proposal_reverts() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, o1, o2, o3) = setup_2of3(&env);
+        let (client, o1, _o2, _o3) = setup_2of3(&env);
         let token = Address::generate(&env);
         let to = Address::generate(&env);
 
@@ -1958,6 +1961,7 @@ mod tests {
     #[test]
     fn test_execute_emits_event() {
         use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryFromVal;
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
