@@ -2479,4 +2479,39 @@ mod tests {
             "config should not be set after failed initialize"
         );
     }
+
+    #[test]
+    fn test_get_config_returns_none_before_initialize_and_correct_config_after() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Register the contract without calling initialize()
+        let contract_id = env.register_contract(None, GovernorContract);
+        let client = GovernorContractClient::new(&env, &contract_id);
+
+        // get_config() must return None before initialization
+        assert!(client.get_config().is_none());
+
+        // Build a known config
+        let admin = Address::generate(&env);
+        let vote_token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let config = GovernorConfig {
+            admin: admin.clone(),
+            vote_token: vote_token.clone(),
+            voting_period: 7200,
+            quorum: 50,
+            timelock_delay: 43200,
+        };
+
+        client.initialize(&config);
+
+        // get_config() must return Some with the exact values passed to initialize()
+        let stored = client.get_config().expect("config should be Some after initialize");
+        assert_eq!(stored.vote_token, vote_token);
+        assert_eq!(stored.voting_period, 7200);
+        assert_eq!(stored.quorum, 50);
+        assert_eq!(stored.timelock_delay, 43200);
+    }
 }
