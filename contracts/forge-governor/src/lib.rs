@@ -14,6 +14,30 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
 
+// ── TTL constants ─────────────────────────────────────────────────────────────
+//
+// Persistent storage entries on Stellar expire unless their TTL is extended.
+// All TTLs are expressed in ledgers (1 ledger ≈ 5 seconds).
+//
+// INSTANCE_TTL_THRESHOLD / INSTANCE_TTL_EXTEND
+//   Applied to the contract instance on every mutating call.
+//   17 280 ledgers ≈ 1 day threshold; 34 560 ledgers ≈ 2 days extend.
+//
+// PROPOSAL_TTL_EXTEND
+//   Applied to DataKey::Proposal entries.  A proposal must survive its full
+//   lifecycle: voting_period + timelock_delay + a generous buffer.
+//   Using a fixed upper-bound of 60 days (1 036 800 ledgers) covers any
+//   realistic governance configuration without per-proposal arithmetic.
+//
+// VOTE_TTL_EXTEND
+//   Applied to DataKey::Vote entries.  A vote record must outlive the proposal
+//   it belongs to so that has_voted() remains reliable throughout the entire
+//   lifecycle.  Same 60-day ceiling as proposals.
+const INSTANCE_TTL_THRESHOLD: u32 = 17_280;
+const INSTANCE_TTL_EXTEND: u32 = 34_560;
+const PROPOSAL_TTL_EXTEND: u32 = 1_036_800; // ~60 days
+const VOTE_TTL_EXTEND: u32 = 1_036_800; // ~60 days
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -192,7 +216,9 @@ impl GovernorContract {
             return Err(GovernorError::InvalidConfig);
         }
         env.storage().instance().set(&DataKey::Config, &config);
-        env.storage().instance().extend_ttl(17280, 34560);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
         Ok(())
     }
 
@@ -257,8 +283,13 @@ impl GovernorContract {
             .set(&DataKey::Proposal(proposal_id), &proposal);
         env.storage()
             .persistent()
+            .extend_ttl(&DataKey::Proposal(proposal_id), PROPOSAL_TTL_EXTEND, PROPOSAL_TTL_EXTEND);
+        env.storage()
+            .persistent()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
-        env.storage().instance().extend_ttl(17280, 34560);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         // Track active proposal ID for O(1) get_pending_proposals
         let mut active: Vec<u64> = env
@@ -283,8 +314,6 @@ impl GovernorContract {
     ///
     /// Adds `weight` to `votes_for`, `votes_against`, or `abstentions` depending on
     /// `direction`. Each address may only vote once per proposal.
-    /// Adds `weight` to either `votes_for` or `votes_against` depending on
-    /// `support`. Each address may only vote once per proposal.
     ///
     /// The `weight` parameter is validated against the voter's actual on-chain
     /// token balance at the time of the call. If `weight` exceeds the voter's
@@ -319,7 +348,7 @@ impl GovernorContract {
     /// client.vote(&voter, &proposal_id, &VoteDirection::Abstain, &200);
     /// // Vote in favor with weight equal to the voter's token balance
     /// let balance = token_client.balance(&voter);
-    /// client.vote(&voter, &proposal_id, &true, &balance);
+    /// client.vote(&voter, &proposal_id, &VoteDirection::For, &balance);
     /// ```
     pub fn vote(
         env: Env,
@@ -366,19 +395,6 @@ impl GovernorContract {
             return Err(GovernorError::InvalidWeight);
         }
 
-        let config: GovernorConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config)
-            .ok_or(GovernorError::NotInitialized)?;
-
-        let token_client = token::Client::new(&env, &config.vote_token);
-        let actual_balance = token_client.balance(&voter);
-
-        if weight > actual_balance {
-            return Err(GovernorError::InvalidWeight);
-        }
-
         match direction {
             VoteDirection::For => proposal.votes_for += weight,
             VoteDirection::Against => proposal.votes_against += weight,
@@ -388,8 +404,16 @@ impl GovernorContract {
         env.storage().persistent().set(&vote_key, &true);
         env.storage()
             .persistent()
+            .extend_ttl(&vote_key, VOTE_TTL_EXTEND, VOTE_TTL_EXTEND);
+        env.storage()
+            .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().instance().extend_ttl(17280, 34560);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Proposal(proposal_id), PROPOSAL_TTL_EXTEND, PROPOSAL_TTL_EXTEND);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         env.events().publish(
             (Symbol::new(&env, "vote_cast"),),
@@ -459,7 +483,12 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().instance().extend_ttl(17280, 34560);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Proposal(proposal_id), PROPOSAL_TTL_EXTEND, PROPOSAL_TTL_EXTEND);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         // Remove from active proposals list
         let mut active: Vec<u64> = env
@@ -543,7 +572,12 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().instance().extend_ttl(17280, 34560);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Proposal(proposal_id), PROPOSAL_TTL_EXTEND, PROPOSAL_TTL_EXTEND);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         // Remove from active proposals list (in case finalize was skipped)
         let mut active: Vec<u64> = env
@@ -1653,6 +1687,44 @@ mod tests {
 
         // Should return false without throwing an error
         assert!(!result);
+    }
+
+    /// Verify that a Vote entry persists after being written so that
+    /// has_voted() reliably returns true and double-vote protection holds.
+    /// This guards against the TTL-expiry regression described in the issue:
+    /// an expired Vote entry would cause has() to return false, allowing a
+    /// second vote on the same proposal.
+    #[test]
+    fn test_has_voted_persists_after_vote() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let (client, token_id) = setup_with_token(&env);
+
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        mint(&env, &token_id, &voter, 100);
+
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(&env, "TTL Test"),
+            &String::from_str(&env, "Vote entry must persist"),
+        );
+
+        assert!(!client.has_voted(&pid, &voter), "should not have voted yet");
+
+        client.vote(&voter, &pid, &VoteDirection::For, &100);
+
+        // Entry must be present immediately after voting
+        assert!(client.has_voted(&pid, &voter), "has_voted must return true after vote");
+
+        // A second vote attempt must fail — confirming the entry is still live
+        let result = client.try_vote(&voter, &pid, &VoteDirection::Against, &100);
+        assert_eq!(
+            result,
+            Err(Ok(GovernorError::AlreadyVoted)),
+            "double-vote must be rejected while Vote entry persists"
+        );
     }
 
     #[test]

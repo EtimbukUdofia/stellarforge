@@ -95,6 +95,9 @@ pub enum StreamError {
     AlreadyCancelled = 4,
     InvalidConfig = 5,
     StreamFinished = 6,
+    /// Sender's token balance is less than the total required to fund the stream
+    /// (`rate_per_second * duration_seconds`).
+    InsufficientFunds = 7,
 }
 
 #[contract]
@@ -131,6 +134,7 @@ impl ForgeStream {
     ///
     /// # Errors
     /// - `InvalidConfig` if rate <= 0 or duration == 0
+    /// - `InsufficientFunds` if sender balance < rate_per_second * duration_seconds
     pub fn create_stream(
         env: Env,
         sender: Address,
@@ -160,6 +164,9 @@ impl ForgeStream {
 
         // Pull total tokens from sender into contract
         let token_client = token::Client::new(&env, &token);
+        if token_client.balance(&sender) < total {
+            return Err(StreamError::InsufficientFunds);
+        }
         token_client.transfer(&sender, &env.current_contract_address(), &total);
 
         let stream = Stream {
@@ -1004,6 +1011,21 @@ mod tests {
 
         let result = client.try_create_stream(&sender, &token, &recipient, &0, &1000);
         assert_eq!(result, Err(Ok(StreamError::InvalidConfig)));
+    }
+
+    #[test]
+    fn test_create_stream_insufficient_funds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        // Mint only 999 tokens but the stream needs 100 * 10 = 1000
+        let token_id = setup_token(&env, &sender, 999);
+
+        let result = client.try_create_stream(&sender, &token_id, &recipient, &100, &10);
+        assert_eq!(result, Err(Ok(StreamError::InsufficientFunds)));
     }
 
     #[test]
@@ -2778,6 +2800,188 @@ mod tests {
             total,
             "withdrawable + returnable must equal total"
         );
+    }
+
+    // ── Event emission tests ──────────────────────────────────────────────────
+
+    fn make_stream_for_events(
+        env: &Env,
+        client: &ForgeStreamClient,
+        rate: i128,
+        duration: u64,
+    ) -> (Address, Address, Address, u64) {
+        use soroban_sdk::token::StellarAssetClient;
+        let sender = Address::generate(env);
+        let recipient = Address::generate(env);
+        let total = rate * duration as i128;
+        let token_admin = Address::generate(env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token_id).mint(&sender, &total);
+        let stream_id = client.create_stream(&sender, &token_id, &recipient, &rate, &duration);
+        (sender, recipient, token_id, stream_id)
+    }
+
+    #[test]
+    fn test_create_stream_emits_stream_created_event() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+
+        let rate: i128 = 100;
+        let duration: u64 = 3600;
+        let (_, recipient, _, stream_id) =
+            make_stream_for_events(&env, &client, rate, duration);
+
+        let events = env.events().all();
+        let found = events.iter().any(|(_, topics, data)| {
+            topics
+                .get(0)
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_created"))
+                .unwrap_or(false)
+                && <(u64, Address, i128, u64)>::try_from_val(&env, &data)
+                    .map(|(id, r, rps, dur)| {
+                        id == stream_id && r == recipient && rps == rate && dur == duration
+                    })
+                    .unwrap_or(false)
+        });
+        assert!(found, "Expected stream_created event with correct payload not found");
+    }
+
+    #[test]
+    fn test_withdraw_emits_withdrawn_event() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+
+        let rate: i128 = 100;
+        let duration: u64 = 3600;
+        let (_, recipient, _, stream_id) =
+            make_stream_for_events(&env, &client, rate, duration);
+
+        // Advance 50s so there are tokens to withdraw
+        env.ledger().with_mut(|l| l.timestamp = 50);
+        let amount = client.withdraw(&stream_id);
+
+        let events = env.events().all();
+        let found = events.iter().any(|(_, topics, data)| {
+            topics
+                .get(0)
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "withdrawn"))
+                .unwrap_or(false)
+                && <(u64, Address, i128)>::try_from_val(&env, &data)
+                    .map(|(id, r, amt)| id == stream_id && r == recipient && amt == amount)
+                    .unwrap_or(false)
+        });
+        assert!(found, "Expected withdrawn event with correct payload not found");
+    }
+
+    #[test]
+    fn test_cancel_stream_emits_stream_cancelled_event() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+
+        let rate: i128 = 100;
+        let duration: u64 = 3600;
+        let (_, _, _, stream_id) =
+            make_stream_for_events(&env, &client, rate, duration);
+
+        // Advance 100s so some tokens have streamed
+        env.ledger().with_mut(|l| l.timestamp = 100);
+        client.cancel_stream(&stream_id);
+
+        // streamed = 100 * 100 = 10_000; returnable = 360_000 - 10_000 = 350_000
+        let expected_withdrawable = 10_000i128;
+        let expected_returnable = 350_000i128;
+
+        let events = env.events().all();
+        let found = events.iter().any(|(_, topics, data)| {
+            topics
+                .get(0)
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_cancelled"))
+                .unwrap_or(false)
+                && <(u64, i128, i128)>::try_from_val(&env, &data)
+                    .map(|(id, w, r)| {
+                        id == stream_id && w == expected_withdrawable && r == expected_returnable
+                    })
+                    .unwrap_or(false)
+        });
+        assert!(found, "Expected stream_cancelled event with correct payload not found");
+    }
+
+    #[test]
+    fn test_pause_stream_emits_stream_paused_event() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+
+        let (_, _, _, stream_id) =
+            make_stream_for_events(&env, &client, 100, 3600);
+
+        env.ledger().with_mut(|l| l.timestamp = 50);
+        client.pause_stream(&stream_id);
+
+        let events = env.events().all();
+        let found = events.iter().any(|(_, topics, data)| {
+            topics
+                .get(0)
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_paused"))
+                .unwrap_or(false)
+                && <(u64,)>::try_from_val(&env, &data)
+                    .map(|(id,)| id == stream_id)
+                    .unwrap_or(false)
+        });
+        assert!(found, "Expected stream_paused event not found");
+    }
+
+    #[test]
+    fn test_resume_stream_emits_stream_resumed_event() {
+        use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+
+        let (_, _, _, stream_id) =
+            make_stream_for_events(&env, &client, 100, 3600);
+
+        env.ledger().with_mut(|l| l.timestamp = 50);
+        client.pause_stream(&stream_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 150);
+        client.resume_stream(&stream_id);
+
+        let events = env.events().all();
+        let found = events.iter().any(|(_, topics, data)| {
+            topics
+                .get(0)
+                .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+                .map(|s| s == Symbol::new(&env, "stream_resumed"))
+                .unwrap_or(false)
+                && <(u64,)>::try_from_val(&env, &data)
+                    .map(|(id,)| id == stream_id)
+                    .unwrap_or(false)
+        });
+        assert!(found, "Expected stream_resumed event not found");
     }
 
     /// Issue #268: cancel_stream() with a paused stream — paused time is excluded from streamed.
