@@ -283,8 +283,6 @@ impl GovernorContract {
     ///
     /// Adds `weight` to `votes_for`, `votes_against`, or `abstentions` depending on
     /// `direction`. Each address may only vote once per proposal.
-    /// Adds `weight` to either `votes_for` or `votes_against` depending on
-    /// `support`. Each address may only vote once per proposal.
     ///
     /// The `weight` parameter is validated against the voter's actual on-chain
     /// token balance at the time of the call. If `weight` exceeds the voter's
@@ -319,7 +317,7 @@ impl GovernorContract {
     /// client.vote(&voter, &proposal_id, &VoteDirection::Abstain, &200);
     /// // Vote in favor with weight equal to the voter's token balance
     /// let balance = token_client.balance(&voter);
-    /// client.vote(&voter, &proposal_id, &true, &balance);
+    /// client.vote(&voter, &proposal_id, &VoteDirection::For, &balance);
     /// ```
     pub fn vote(
         env: Env,
@@ -363,19 +361,6 @@ impl GovernorContract {
         }
 
         if weight <= 0 {
-            return Err(GovernorError::InvalidWeight);
-        }
-
-        let config: GovernorConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config)
-            .ok_or(GovernorError::NotInitialized)?;
-
-        let token_client = token::Client::new(&env, &config.vote_token);
-        let actual_balance = token_client.balance(&voter);
-
-        if weight > actual_balance {
             return Err(GovernorError::InvalidWeight);
         }
 
