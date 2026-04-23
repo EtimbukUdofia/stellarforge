@@ -16,7 +16,7 @@ Developers evaluating StellarForge can use this table to quickly identify the ri
 | [`forge-oracle`](#forge-oracle) | Price Feed | Yes (Admin) | `price_updated` | No |
 | [`forge-stream`](#forge-stream) | Real-time Payments | No (Stream-specific) | `stream_created`, `withdrawn`, `stream_cancelled`, `stream_paused`, `stream_resumed` | No |
 | [`forge-vesting`](#forge-vesting) | Token Vesting | Yes (Admin) | `vesting_initialized`, `claimed`, `vesting_cancelled`, `admin_transferred` | Yes (Cliff period) |
-
+| [`forge-vesting-factory`](#forge-vesting-factory) | Multi-beneficiary Vesting | Yes (Per-schedule Admin) | `schedule_created`, `claimed`, `schedule_cancelled` | Yes (Cliff period) |
 ---
 
 ## 🔒 Audit Status
@@ -68,6 +68,16 @@ Deploy tokens on a vesting schedule with an optional cliff period. Perfect for t
   * `get_vesting_schedule()` — public-facing; returns token, beneficiary, amounts, and timing. No admin address or cancellation state.
   * `get_status()` — public-facing; returns claimable amount, vested amount, cliff status, and pause state.
   * `get_config()` — admin tooling only; returns the full internal config including admin address and cancellation flag. Prefer the two functions above for UI integrations.
+
+### forge-vesting-factory
+A single-deployment factory that manages multiple vesting schedules. Eliminates the need to deploy a separate contract per beneficiary — ideal for companies vesting tokens for many employees or investors.
+
+* **Key Function:** `create_schedule(token, beneficiary, admin, total_amount, cliff_seconds, duration_seconds) -> u64` — creates a new schedule and returns its `schedule_id`. Transfers tokens from admin into the factory on creation.
+* **Action:** `claim(schedule_id)` — beneficiary withdraws all currently unlocked tokens for that schedule.
+* **Security:** `cancel(schedule_id)` — admin cancels a schedule; vested tokens go to the beneficiary, unvested tokens return to the admin.
+* **Read functions:**
+  * `get_status(schedule_id)` — returns vested, claimed, claimable, cliff status, and cancellation state.
+  * `get_schedule_count()` — returns the total number of schedules ever created.
 
 ### forge-stream
 Pay-per-second token streams. Ideal for payroll, subscriptions, or real-time contractor payments.

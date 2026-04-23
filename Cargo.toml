@@ -3,6 +3,7 @@ resolver = "2"
 
 members = [
     "contracts/forge-vesting",
+    "contracts/forge-vesting-factory",
     "contracts/forge-stream",
     "contracts/forge-multisig",
     "contracts/forge-governor",
