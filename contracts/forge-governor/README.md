@@ -49,6 +49,27 @@ Soroban charges fees based on:
 
 ---
 
+## TTL Strategy
+
+Stellar persistent storage entries expire when their TTL (time-to-live) reaches zero. Without explicit TTL management, expired entries silently return `false` from `has()`, which would break double-vote protection — an expired `Vote` entry would allow a voter to cast a second vote on the same proposal.
+
+### Constants
+
+| Constant | Ledgers | Approx. time | Applied to |
+| :--- | :---: | :---: | :--- |
+| `INSTANCE_TTL_THRESHOLD` | 17 280 | ~1 day | Contract instance (bump trigger) |
+| `INSTANCE_TTL_EXTEND` | 34 560 | ~2 days | Contract instance (bump target) |
+| `PROPOSAL_TTL_EXTEND` | 1 036 800 | ~60 days | `DataKey::Proposal` entries |
+| `VOTE_TTL_EXTEND` | 1 036 800 | ~60 days | `DataKey::Vote` entries |
+
+### Rationale
+
+- `DataKey::Proposal` entries are extended on every write (`propose`, `vote`, `finalize`, `execute`) to ensure the proposal remains readable throughout its full lifecycle.
+- `DataKey::Vote` entries are extended immediately after being written in `vote()`. The 60-day ceiling covers any realistic `voting_period + timelock_delay` configuration with a large safety buffer.
+- The contract instance TTL is bumped on every mutating call using a threshold/extend pattern so it is only extended when it is actually close to expiry, avoiding unnecessary ledger writes.
+
+---
+
 ## Tie-Breaking Behaviour
 
 When `finalize()` is called after the voting period ends, the contract requires a **strict majority** to pass a proposal:
