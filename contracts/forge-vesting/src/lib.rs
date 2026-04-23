@@ -2010,4 +2010,111 @@ mod tests {
         assert!(!found, "admin_transferred event should not be emitted on failure");
     }
 
+    /// Verifies claimable amount at exactly cliff_seconds is (total * cliff) / duration.
+    /// Uses total=10_000, cliff=100, duration=1000 → expected 1_000.
+    #[test]
+    fn test_claimable_at_exactly_cliff_is_correct() {
+        const TOTAL: i128 = 10_000;
+        const CLIFF: u64 = 100;
+        const DURATION: u64 = 1000;
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &TOTAL, &CLIFF, &DURATION);
+
+        // t=100: 10_000 * 100 / 1000 = 1_000
+        env.ledger().with_mut(|l| l.timestamp = 100);
+        assert_eq!(client.get_status().claimable, 1_000);
+        assert_eq!(client.claim(), 1_000);
+    }
+
+    /// Verifies claimable amount at cliff_seconds+1 is (total * (cliff+1)) / duration.
+    /// Uses total=10_000, cliff=100, duration=1000 → expected 1_010.
+    #[test]
+    fn test_claimable_at_cliff_plus_one_is_correct() {
+        const TOTAL: i128 = 10_000;
+        const CLIFF: u64 = 100;
+        const DURATION: u64 = 1000;
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &TOTAL, &CLIFF, &DURATION);
+
+        // t=101: 10_000 * 101 / 1000 = 1_010
+        env.ledger().with_mut(|l| l.timestamp = 101);
+        assert_eq!(client.get_status().claimable, 1_010);
+        assert_eq!(client.claim(), 1_010);
+    }
+
+    /// Verifies claimable amount at duration_seconds-1 is (total * (duration-1)) / duration.
+    /// Uses total=10_000, cliff=100, duration=1000 → expected 9_990 (truncated).
+    #[test]
+    fn test_claimable_at_duration_minus_one_is_correct() {
+        const TOTAL: i128 = 10_000;
+        const CLIFF: u64 = 100;
+        const DURATION: u64 = 1000;
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &TOTAL, &CLIFF, &DURATION);
+
+        // t=999: 10_000 * 999 / 1000 = 9_990
+        env.ledger().with_mut(|l| l.timestamp = 999);
+        assert_eq!(client.get_status().claimable, 9_990);
+        assert_eq!(client.claim(), 9_990);
+    }
+
+    /// Verifies claimable amount at exactly duration_seconds equals total_amount.
+    /// Uses total=10_000, cliff=100, duration=1000 → expected 10_000.
+    #[test]
+    fn test_claimable_at_full_duration_is_total_amount() {
+        const TOTAL: i128 = 10_000;
+        const CLIFF: u64 = 100;
+        const DURATION: u64 = 1000;
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &TOTAL, &CLIFF, &DURATION);
+
+        // t=1000: fully vested → 10_000
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        assert_eq!(client.get_status().claimable, TOTAL);
+        assert_eq!(client.claim(), TOTAL);
+    }
+
+    /// Verifies that claiming at duration-1 then duration yields 9_990 + 10 = 10_000,
+    /// recovering the truncated remainder with no tokens lost.
+    #[test]
+    fn test_sequential_claim_duration_minus_one_then_duration_sums_to_total() {
+        const TOTAL: i128 = 10_000;
+        const CLIFF: u64 = 100;
+        const DURATION: u64 = 1000;
+
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &TOTAL, &CLIFF, &DURATION);
+
+        // t=999: 10_000 * 999 / 1000 = 9_990
+        env.ledger().with_mut(|l| l.timestamp = 999);
+        let first = client.claim();
+        assert_eq!(first, 9_990);
+
+        // t=1000: fully vested, 10 remaining (truncated dust recovered)
+        env.ledger().with_mut(|l| l.timestamp = 1000);
+        let second = client.claim();
+        assert_eq!(second, 10);
+
+        assert_eq!(first + second, TOTAL);
+    }
+
 }
