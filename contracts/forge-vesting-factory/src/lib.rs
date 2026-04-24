@@ -109,7 +109,7 @@ impl ForgeVestingFactory {
             return Err(FactoryError::InvalidConfig);
         }
 
-        let id: u64 = env
+        let schedule_id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::ScheduleCount)
@@ -135,15 +135,17 @@ impl ForgeVestingFactory {
 
         env.storage()
             .persistent()
-            .set(&DataKey::Schedule(id), &config);
+            .set(&DataKey::Schedule(schedule_id), &config);
         env.storage()
             .instance()
-            .set(&DataKey::ScheduleCount, &(id + 1));
+            .set(&DataKey::ScheduleCount, &(schedule_id + 1));
 
-        env.events()
-            .publish((Symbol::new(&env, "schedule_created"),), (id, total_amount));
+        env.events().publish(
+            (Symbol::new(&env, "schedule_created"),),
+            (schedule_id, total_amount),
+        );
 
-        Ok(id)
+        Ok(schedule_id)
     }
 
     /// Claim all currently vested and unclaimed tokens for a schedule.
@@ -365,8 +367,8 @@ mod tests {
     }
 
     fn make_client(env: &Env) -> ForgeVestingFactoryClient {
-        let id = env.register_contract(None, ForgeVestingFactory);
-        ForgeVestingFactoryClient::new(env, &id)
+        let contract_id = env.register_contract(None, ForgeVestingFactory);
+        ForgeVestingFactoryClient::new(env, &contract_id)
     }
 
     #[test]
@@ -392,8 +394,8 @@ mod tests {
         let token = setup_token(&env, &admin, 3_000);
 
         for expected_id in 0u64..3 {
-            let b = Address::generate(&env);
-            let id = client.create_schedule(&token, &b, &admin, &1_000, &0, &1_000);
+            let beneficiary = Address::generate(&env);
+            let id = client.create_schedule(&token, &beneficiary, &admin, &1_000, &0, &1_000);
             assert_eq!(id, expected_id);
         }
         assert_eq!(client.get_schedule_count(), 3);
@@ -556,22 +558,28 @@ mod tests {
         env.mock_all_auths();
         let client = make_client(&env);
         let admin = Address::generate(&env);
-        let b = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
         let token = setup_token(&env, &admin, 1_000);
 
         // zero total_amount
         assert_eq!(
-            client.try_create_schedule(&token, &b, &admin, &0, &0, &1_000).unwrap_err(),
+            client
+                .try_create_schedule(&token, &beneficiary, &admin, &0, &0, &1_000)
+                .unwrap_err(),
             Ok(FactoryError::InvalidConfig)
         );
         // zero duration
         assert_eq!(
-            client.try_create_schedule(&token, &b, &admin, &1_000, &0, &0).unwrap_err(),
+            client
+                .try_create_schedule(&token, &beneficiary, &admin, &1_000, &0, &0)
+                .unwrap_err(),
             Ok(FactoryError::InvalidConfig)
         );
         // cliff > duration
         assert_eq!(
-            client.try_create_schedule(&token, &b, &admin, &1_000, &500, &100).unwrap_err(),
+            client
+                .try_create_schedule(&token, &beneficiary, &admin, &1_000, &500, &100)
+                .unwrap_err(),
             Ok(FactoryError::InvalidConfig)
         );
     }
