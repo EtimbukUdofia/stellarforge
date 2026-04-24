@@ -166,9 +166,11 @@ impl ForgeOracle {
                 .persistent()
                 .get::<DataKey, i128>(&DataKey::Price(pair.clone()))
             {
-                let deviation = (price - prev_price).abs() * 10_000 / prev_price;
-                if deviation > max_deviation_bps as i128 {
-                    return Err(OracleError::PriceDeviationTooHigh);
+                if prev_price > 0 {
+                    let deviation = (price - prev_price).abs() * 10_000 / prev_price;
+                    if deviation > max_deviation_bps as i128 {
+                        return Err(OracleError::PriceDeviationTooHigh);
+                    }
                 }
             }
         }
@@ -181,14 +183,15 @@ impl ForgeOracle {
         if !env.storage().persistent().has(&DataKey::Price(pair_key)) {
             let mut pairs: Vec<PricePair> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::Pairs)
                 .unwrap_or_else(|| vec![&env]);
             pairs.push_back(PricePair {
                 base: base.clone(),
                 quote: quote.clone(),
             });
-            env.storage().instance().set(&DataKey::Pairs, &pairs);
+            env.storage().persistent().set(&DataKey::Pairs, &pairs);
+            env.storage().persistent().extend_ttl(&DataKey::Pairs, 17280, 34560);
         }
 
         env.storage()
@@ -380,16 +383,19 @@ impl ForgeOracle {
         }
         let pairs: Vec<PricePair> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Pairs)
             .unwrap_or_else(|| vec![&env]);
         let mut result: Vec<PriceEntry> = vec![&env];
         for pair in pairs.iter() {
-            let price: i128 = env
+            let price: i128 = match env
                 .storage()
                 .persistent()
                 .get(&DataKey::Price(pair.clone()))
-                .unwrap_or(0);
+            {
+                Some(p) => p,
+                None => continue,
+            };
             let updated_at: u64 = env
                 .storage()
                 .persistent()
