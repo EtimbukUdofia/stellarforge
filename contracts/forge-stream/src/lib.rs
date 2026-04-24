@@ -967,14 +967,15 @@ impl ForgeStream {
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use crate::ForgeStream;
 
     use super::*;
+    use crate::ForgeStream;
+
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::{Client as TokenClient, StellarAssetClient},
+        Env, IntoVal,
     };
-    use soroban_sdk::{Env, IntoVal};
 
     fn setup_token(env: &Env, sender: &Address, total: i128) -> Address {
         let token_admin = Address::generate(env);
