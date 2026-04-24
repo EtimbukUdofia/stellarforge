@@ -153,6 +153,9 @@ pub enum GovernorError {
     AlreadyCancelled = 12,
     InvalidWeight = 13,
     AlreadyFinalized = 14,
+    Unauthorized = 14,
+    AlreadyFinalized = 15,
+    VoteNotFound = 16,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -696,18 +699,24 @@ impl GovernorContract {
 
     /// Return the governor configuration set at initialization.
     ///
-    /// Read-only; returns `None` if `initialize` has not been called yet.
+    /// Read-only; returns an error if `initialize` has not been called yet.
     ///
     /// # Returns
-    /// `Some(`[`GovernorConfig`]`)` with the stored configuration, or `None`.
+    /// `Ok(`[`GovernorConfig`]`)` with the stored configuration.
+    ///
+    /// # Errors
+    /// - [`GovernorError::NotInitialized`] — `initialize` has not been called.
     ///
     /// # Example
     /// ```text
     /// let config = client.get_config().unwrap();
     /// println!("quorum: {}", config.quorum);
     /// ```
-    pub fn get_config(env: Env) -> Option<GovernorConfig> {
-        env.storage().instance().get(&DataKey::Config)
+    pub fn get_config(env: Env) -> Result<GovernorConfig, GovernorError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(GovernorError::NotInitialized)
     }
 
     /// Return the total number of proposals that have been created.
@@ -761,25 +770,38 @@ impl GovernorContract {
     /// Return the weight a voter cast on a specific proposal.
     ///
     /// Looks up the persistent vote entry written by [`vote`](Self::vote).
-    /// Returns `Some(weight)` if the voter has cast a vote, or `None` if they
-    /// have not voted (or if the proposal does not exist).
+    /// Returns an error if the proposal or vote entry does not exist.
     ///
     /// # Parameters
     /// - `proposal_id` — ID of the proposal to query.
     /// - `voter` — Address of the voter to look up.
     ///
     /// # Returns
-    /// `Some(i128)` — the weight the voter cast, or `None` if no vote was found.
+    /// `Ok(i128)` — the weight the voter cast.
+    ///
+    /// # Errors
+    /// - [`GovernorError::ProposalNotFound`] — The proposal ID does not exist.
+    /// - [`GovernorError::VoteNotFound`] — The voter has not cast a vote on the proposal.
     ///
     /// # Example
     /// ```text
-    /// let weight = client.get_vote_weight(&proposal_id, &voter_address);
-    /// assert_eq!(weight, Some(500));
+    /// let weight = client.get_vote_weight(&proposal_id, &voter_address)?;
+    /// assert_eq!(weight, 500);
     /// ```
-    pub fn get_vote_weight(env: Env, proposal_id: u64, voter: Address) -> Option<i128> {
+    pub fn get_vote_weight(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<i128, GovernorError> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Proposal>(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernorError::ProposalNotFound)?;
+
         env.storage()
             .persistent()
             .get(&DataKey::Vote(proposal_id, voter))
+            .ok_or(GovernorError::VoteNotFound)
     }
 
     /// Return the current state of a proposal.
@@ -1009,9 +1031,9 @@ mod tests {
         );
 
         // Verify contract is still not initialized
-        assert!(
-            client.get_config().is_none(),
-            "config should not be set after failed initialize"
+        assert_eq!(
+            client.try_get_config().unwrap_err().unwrap(),
+            GovernorError::NotInitialized.into()
         );
 
         // Now admin initializes with proper config
@@ -2712,14 +2734,14 @@ mod tests {
         );
 
         // Contract must remain uninitialized
-        assert!(
-            client.get_config().is_none(),
-            "config should not be set after failed initialize"
+        assert_eq!(
+            client.try_get_config().unwrap_err().unwrap(),
+            GovernorError::NotInitialized.into()
         );
     }
 
     #[test]
-    fn test_get_config_returns_none_before_initialize_and_correct_config_after() {
+    fn test_get_config_returns_not_initialized_before_initialize_and_correct_config_after() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2727,8 +2749,11 @@ mod tests {
         let contract_id = env.register_contract(None, GovernorContract);
         let client = GovernorContractClient::new(&env, &contract_id);
 
-        // get_config() must return None before initialization
-        assert!(client.get_config().is_none());
+        // get_config() must return NotInitialized before initialization
+        assert_eq!(
+            client.try_get_config().unwrap_err().unwrap(),
+            GovernorError::NotInitialized.into()
+        );
 
         // Build a known config
         let admin = Address::generate(&env);
@@ -2745,10 +2770,10 @@ mod tests {
 
         client.initialize(&config);
 
-        // get_config() must return Some with the exact values passed to initialize()
+        // get_config() must return Ok with the exact values passed to initialize()
         let stored = client
             .get_config()
-            .expect("config should be Some after initialize");
+            .expect("config should be Ok after initialize");
         assert_eq!(stored.vote_token, vote_token);
         assert_eq!(stored.voting_period, 7200);
         assert_eq!(stored.quorum, 50);
@@ -2772,17 +2797,20 @@ mod tests {
             &String::from_str(&env, "D"),
         );
 
-        // Before voting, weight should be None
-        assert_eq!(client.get_vote_weight(&pid, &voter), None);
+        // Before voting, weight should return VoteNotFound
+        assert_eq!(
+            client.try_get_vote_weight(&pid, &voter).unwrap_err().unwrap(),
+            GovernorError::VoteNotFound.into()
+        );
 
         client.vote(&voter, &pid, &VoteDirection::For, &500);
 
         // After voting, weight should match what was cast
-        assert_eq!(client.get_vote_weight(&pid, &voter), Some(500));
+        assert_eq!(client.get_vote_weight(&pid, &voter), 500);
     }
 
     #[test]
-    fn test_get_vote_weight_returns_none_for_non_voter() {
+    fn test_get_vote_weight_returns_vote_not_found_for_non_voter() {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
@@ -2802,13 +2830,16 @@ mod tests {
         client.vote(&voter, &pid, &VoteDirection::Against, &75);
 
         // voter's weight is stored
-        assert_eq!(client.get_vote_weight(&pid, &voter), Some(75));
-        // non_voter never voted — must return None
-        assert_eq!(client.get_vote_weight(&pid, &non_voter), None);
+        assert_eq!(client.get_vote_weight(&pid, &voter), 75);
+        // non_voter never voted — must return VoteNotFound
+        assert_eq!(
+            client.try_get_vote_weight(&pid, &non_voter).unwrap_err().unwrap(),
+            GovernorError::VoteNotFound.into()
+        );
     }
 
     #[test]
-    fn test_get_vote_weight_returns_none_for_nonexistent_proposal() {
+    fn test_get_vote_weight_returns_proposal_not_found_for_nonexistent_proposal() {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().with_mut(|l| l.timestamp = 0);
@@ -2817,7 +2848,10 @@ mod tests {
         let voter = Address::generate(&env);
 
         // Proposal 999 was never created
-        assert_eq!(client.get_vote_weight(&999, &voter), None);
+        assert_eq!(
+            client.try_get_vote_weight(&999, &voter).unwrap_err().unwrap(),
+            GovernorError::ProposalNotFound.into()
+        );
     }
 
     // ── Tests for finalize() state handling (issue #138 compatibility) ────────
