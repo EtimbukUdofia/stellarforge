@@ -11,7 +11,7 @@ use soroban_sdk::{
 };
 
 // Re-export generated clients from each contract crate
-use forge_governor::{GovernorConfig, GovernorContractClient};
+use forge_governor::{GovernorConfig, GovernorContractClient, VoteDirection};
 use forge_multisig::MultisigContractClient;
 use forge_oracle::ForgeOracleClient;
 use forge_stream::ForgeStreamClient;
@@ -117,6 +117,7 @@ fn bench_governor(env: &Env) {
 
     let contract_id = env.register_contract(None, forge_governor::GovernorContract);
     let client = GovernorContractClient::new(env, &contract_id);
+    let admin = Address::generate(env);
     let token_admin = Address::generate(env);
     let vote_token = env
         .register_stellar_asset_contract_v2(token_admin)
@@ -126,6 +127,7 @@ fn bench_governor(env: &Env) {
     soroban_sdk::token::StellarAssetClient::new(env, &vote_token).mint(&voter, &1_000_000);
 
     let config = GovernorConfig {
+        admin: admin.clone(),
         vote_token: vote_token.clone(),
         voting_period: 1000,
         quorum: 500_000,
@@ -145,13 +147,28 @@ fn bench_governor(env: &Env) {
     print_budget("propose()", env);
 
     env.budget().reset_default();
-    client.vote(&voter, &proposal_id, &true, &1_000_000);
+    client.vote(&voter, &proposal_id, &VoteDirection::For, &1_000_000);
     print_budget("vote()", env);
 
     env.ledger().with_mut(|l| l.timestamp += 1001);
     env.budget().reset_default();
     client.finalize(&proposal_id);
     print_budget("finalize()", env);
+
+    let mut active_ids = soroban_sdk::Vec::new(env);
+    for _ in 0..50u32 {
+        let pid = client.propose(
+            &proposer,
+            &String::from_str(env, "Cancel benchmark"),
+            &String::from_str(env, "Measure active removal cost"),
+        );
+        active_ids.push_back(pid);
+    }
+
+    let last_active = active_ids.get(active_ids.len() - 1).unwrap();
+    env.budget().reset_default();
+    client.cancel_proposal(&proposer, &last_active);
+    print_budget("cancel_proposal() with 50 active", env);
 }
 
 fn bench_oracle(env: &Env) {

@@ -47,6 +47,13 @@ Soroban charges fees based on:
 - No vote delegation
 - **Front-running protection:** The `initialize()` function requires authorization from the `admin` address specified in the `GovernorConfig`. This prevents an attacker from monitoring the mempool and front-running the deployer's initialization with a malicious configuration (e.g., quorum = 1, timelock = 0). The admin address must authorize the initialization call via `require_auth()`.
 
+## Pending Proposal Performance
+
+- `propose()` appends the new ID to `ActiveProposals` and records its slot in `ActiveProposalIndex`, so activation remains O(1).
+- `cancel_proposal()`, `finalize()`, and the `execute()` cleanup path remove active IDs with swap-remove plus the index map, so removal remains O(1) even when many proposals are active.
+- `get_pending_proposals()` reads only the current `ActiveProposals` vector and filters out expired or cancelled entries, so enumeration cost is O(n_active), not O(total_proposals_created).
+- `get_pending_proposals()` does not guarantee sorted output; callers should treat the returned IDs as an unordered active set.
+
 ---
 
 ## TTL Strategy

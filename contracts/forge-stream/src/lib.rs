@@ -770,7 +770,9 @@ impl ForgeStream {
     ///
     /// Transfers `rate_per_second * additional_seconds` tokens from the sender to the
     /// contract and pushes `end_time` forward by `additional_seconds`. The stream must
-    /// not be cancelled and must not have already finished.
+    /// not be cancelled, paused, or already finished. Extensions are intentionally
+    /// disallowed while paused so the visible `end_time` continues to reflect
+    /// actively accruing wall-clock time.
     /// Only callable by the stream's `sender`.
     ///
     /// # Parameters
@@ -785,7 +787,7 @@ impl ForgeStream {
     /// - `Unauthorized` — caller is not the stream sender
     /// - `AlreadyCancelled` — stream has been cancelled
     /// - `StreamFinished` — stream end_time has already passed
-    /// - `InvalidConfig` — `additional_seconds` is 0
+    /// - `InvalidConfig` — `additional_seconds` is 0 or the stream is paused
     pub fn extend_stream(
         env: Env,
         stream_id: u64,
@@ -807,6 +809,10 @@ impl ForgeStream {
         }
 
         stream.sender.require_auth();
+
+        if stream.is_paused {
+            return Err(StreamError::InvalidConfig);
+        }
 
         if env.ledger().timestamp() >= stream.end_time {
             return Err(StreamError::StreamFinished);
@@ -3202,6 +3208,28 @@ mod tests {
             Err(Ok(StreamError::StreamFinished)),
             "extending after end_time must revert with StreamFinished"
         );
+    }
+
+    /// Extending a paused stream must revert with InvalidConfig so `end_time`
+    /// does not move while accrual is frozen.
+    #[test]
+    fn test_extend_paused_stream_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let contract_id = env.register_contract(None, ForgeStream);
+        let client = ForgeStreamClient::new(&env, &contract_id);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token = setup_token(&env, &sender, 200_000);
+
+        let stream_id = client.create_stream(&sender, &token, &recipient, &100, &1000);
+
+        env.ledger().with_mut(|l| l.timestamp = 250);
+        client.pause_stream(&stream_id);
+
+        let result = client.try_extend_stream(&stream_id, &500);
+        assert_eq!(result, Err(Ok(StreamError::InvalidConfig)));
     }
 
     /// Extending with additional_seconds = 0 must revert with InvalidConfig.

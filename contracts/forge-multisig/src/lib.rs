@@ -14,6 +14,9 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Env, Symbol, Vec,
 };
 
+const INSTANCE_TTL_THRESHOLD: u32 = 17_280;
+const INSTANCE_TTL_EXTEND: u32 = 34_560;
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -204,7 +207,11 @@ impl MultisigContract {
             .get(&DataKey::NextProposalId)
             .unwrap_or(0u64);
 
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(MultisigError::NotInitialized)?;
         let approved_at = if 1 >= threshold {
             Some(env.ledger().timestamp())
         } else {
@@ -310,7 +317,11 @@ impl MultisigContract {
             .get(&DataKey::NextProposalId)
             .unwrap_or(0u64);
 
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(MultisigError::NotInitialized)?;
         let approved_at = if 1 >= threshold {
             Some(env.ledger().timestamp())
         } else {
@@ -426,7 +437,11 @@ impl MultisigContract {
             .persistent()
             .set(&DataKey::HasApproved(proposal_id, owner.clone()), &true);
 
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(MultisigError::NotInitialized)?;
         // The is_none() guard ensures approved_at is set only once, when the threshold is first reached.
         // This prevents the timelock countdown from being reset if threshold changes in the future.
         // Currently, owners and threshold are immutable after initialize(), but this guard protects
@@ -448,7 +463,9 @@ impl MultisigContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().instance().extend_ttl(17280, 34560);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_approved"),),
@@ -704,12 +721,24 @@ impl MultisigContract {
                 (proposal_id, &owner),
             );
 
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+
             return Ok(());
         }
 
         // For other owners, only allow cancellation if mathematically impossible to pass
-        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
-        let owners: Vec<Address> = env.storage().instance().get(&DataKey::Owners).unwrap();
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(MultisigError::NotInitialized)?;
+        let owners: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Owners)
+            .ok_or(MultisigError::NotInitialized)?;
         let total_owners = owners.len();
 
         // Calculate remaining possible approvals
@@ -741,6 +770,10 @@ impl MultisigContract {
                 (Symbol::new(&env, "proposal_cancelled"),),
                 (proposal_id, &owner),
             );
+
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
             return Ok(());
         }
@@ -2028,6 +2061,30 @@ mod tests {
         // Verify proposal is cancelled
         let proposal = client.get_proposal(&pid).unwrap();
         assert!(proposal.cancelled);
+    }
+
+    #[test]
+    fn test_cancel_returns_not_initialized_when_threshold_missing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, MultisigContract);
+        let client = MultisigContractClient::new(&env, &contract_id);
+        let o1 = Address::generate(&env);
+        let o2 = Address::generate(&env);
+        let o3 = Address::generate(&env);
+        let owners = vec![&env, o1.clone(), o2.clone(), o3.clone()];
+        client.initialize(&owners, &2, &0);
+
+        let token = Address::generate(&env);
+        let to = Address::generate(&env);
+        let pid = client.propose(&o1, &to, &token, &500);
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().remove(&DataKey::Threshold);
+        });
+
+        let result = client.try_cancel(&o2, &pid);
+        assert_eq!(result, Err(Ok(MultisigError::NotInitialized)));
     }
 
     /// Test that non-proposer cannot cancel a proposal that can still reach threshold

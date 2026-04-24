@@ -47,6 +47,7 @@ pub enum DataKey {
     Vote(u64, Address),
     NextProposalId,
     ActiveProposals,
+    ActiveProposalIndex(u64),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -299,10 +300,14 @@ impl GovernorContract {
             .instance()
             .get(&DataKey::ActiveProposals)
             .unwrap_or_else(|| Vec::new(&env));
+        let index = active.len();
         active.push_back(proposal_id);
         env.storage()
             .instance()
             .set(&DataKey::ActiveProposals, &active);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalIndex(proposal_id), &index);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_created"),),
@@ -504,18 +509,7 @@ impl GovernorContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
-        // Remove from active proposals list
-        let mut active: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ActiveProposals)
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(pos) = active.iter().position(|id| id == proposal_id) {
-            active.remove(pos as u32);
-            env.storage()
-                .instance()
-                .set(&DataKey::ActiveProposals, &active);
-        }
+        Self::remove_active_proposal(&env, proposal_id);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_finalized"),),
@@ -594,17 +588,7 @@ impl GovernorContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
 
         // Remove from active proposals list (in case finalize was skipped)
-        let mut active: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ActiveProposals)
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(pos) = active.iter().position(|id| id == proposal_id) {
-            active.remove(pos as u32);
-            env.storage()
-                .instance()
-                .set(&DataKey::ActiveProposals, &active);
-        }
+        Self::remove_active_proposal(&env, proposal_id);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_executed"),),
@@ -676,18 +660,7 @@ impl GovernorContract {
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        // Remove from active proposals list
-        let mut active: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::ActiveProposals)
-            .unwrap_or_else(|| Vec::new(&env));
-        if let Some(pos) = active.iter().position(|id| id == proposal_id) {
-            active.remove(pos as u32);
-            env.storage()
-                .instance()
-                .set(&DataKey::ActiveProposals, &active);
-        }
+        Self::remove_active_proposal(&env, proposal_id);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_cancelled"),),
@@ -883,7 +856,7 @@ impl GovernorContract {
     /// active proposals without off-chain indexing.
     ///
     /// # Returns
-    /// A `Vec<u64>` of proposal IDs open for voting, in ascending ID order.
+    /// A `Vec<u64>` of proposal IDs open for voting, in implementation-defined order.
     /// Returns an empty vector when no proposals are currently pending.
     ///
     /// # Example
@@ -918,6 +891,38 @@ impl GovernorContract {
         }
 
         pending
+    }
+
+    fn remove_active_proposal(env: &Env, proposal_id: u64) {
+        let index_key = DataKey::ActiveProposalIndex(proposal_id);
+        let Some(index) = env.storage().instance().get::<DataKey, u32>(&index_key) else {
+            return;
+        };
+
+        let mut active: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveProposals)
+            .unwrap_or_else(|| Vec::new(env));
+        if active.is_empty() {
+            env.storage().instance().remove(&index_key);
+            return;
+        }
+
+        let last_index = active.len().saturating_sub(1);
+        if index != last_index {
+            let last_id = active.get(last_index).unwrap();
+            active.set(index, last_id);
+            env.storage()
+                .instance()
+                .set(&DataKey::ActiveProposalIndex(last_id), &index);
+        }
+
+        active.remove(last_index);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposals, &active);
+        env.storage().instance().remove(&index_key);
     }
 }
 
@@ -1807,8 +1812,8 @@ mod tests {
 
         let pending = client.get_pending_proposals();
         assert_eq!(pending.len(), 2);
-        assert_eq!(pending.get(0).unwrap(), pid0);
-        assert_eq!(pending.get(1).unwrap(), pid1);
+        assert!(pending.contains(pid0));
+        assert!(pending.contains(pid1));
     }
 
     #[test]
@@ -1907,8 +1912,8 @@ mod tests {
 
         let pending = client.get_pending_proposals();
         assert_eq!(pending.len(), 2);
-        assert_eq!(pending.get(0).unwrap(), pid1);
-        assert_eq!(pending.get(1).unwrap(), pid2);
+        assert!(pending.contains(pid1));
+        assert!(pending.contains(pid2));
     }
 
     // ── Tie-breaking behaviour ─────────────────────────────────────────────────
@@ -2088,11 +2093,7 @@ mod tests {
 
         // Verify the returned IDs match the 15 newly created ones
         for i in 0..15u32 {
-            assert_eq!(
-                pending.get(i).unwrap(),
-                active_ids.get(i).unwrap(),
-                "pending[{i}] mismatch"
-            );
+            assert!(pending.contains(active_ids.get(i).unwrap()));
         }
     }
 
