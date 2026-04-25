@@ -199,6 +199,7 @@ impl ForgeVesting {
     /// # Errors
     /// - [`VestingError::NotInitialized`] — `initialize` has not been called.
     /// - [`VestingError::Cancelled`] — The vesting schedule was cancelled by the admin.
+    /// - [`VestingError::Paused`] — The vesting schedule is currently paused.
     /// - [`VestingError::CliffNotReached`] — Current time is before `start_time + cliff_seconds`.
     /// - [`VestingError::NothingToClaim`] — All vested tokens have already been claimed.
     ///
@@ -219,7 +220,7 @@ impl ForgeVesting {
         }
 
         if config.paused {
-            return Err(VestingError::Common(CommonError::Unauthorized));
+            return Err(VestingError::Paused);
         }
 
         config.beneficiary.require_auth();
@@ -359,7 +360,7 @@ impl ForgeVesting {
             return Err(VestingError::Cancelled);
         }
         if config.paused {
-            return Err(VestingError::Common(CommonError::Unauthorized));
+            return Err(VestingError::Paused);
         }
 
         config.admin.require_auth();
@@ -635,6 +636,7 @@ impl ForgeVesting {
     ///
     /// # Errors
     /// - [`VestingError::NotInitialized`] — Contract not initialized.
+    /// - [`VestingError::Cancelled`] — The vesting schedule has been cancelled.
     /// - [`VestingError::Paused`] — Already paused.
     pub fn pause(env: Env) -> Result<(), VestingError> {
         let mut config: VestingConfig = env
@@ -650,7 +652,7 @@ impl ForgeVesting {
         }
 
         if config.paused {
-            return Err(VestingError::Common(CommonError::Unauthorized));
+            return Err(VestingError::Paused);
         }
 
         config.paused = true;
@@ -668,7 +670,8 @@ impl ForgeVesting {
     ///
     /// # Errors
     /// - [`VestingError::NotInitialized`] — Contract not initialized.
-    /// - [`VestingError::NotPaused`] — Not currently paused.
+    /// - [`VestingError::Cancelled`] — The vesting schedule has been cancelled.
+    /// - [`VestingError::NotPaused`] — Schedule is not currently paused.
     pub fn unpause(env: Env) -> Result<(), VestingError> {
         let mut config: VestingConfig = env
             .storage()
@@ -683,7 +686,7 @@ impl ForgeVesting {
         }
 
         if !config.paused {
-            return Err(VestingError::Common(CommonError::NotInitialized));
+            return Err(VestingError::NotPaused);
         }
 
         let now = env.ledger().timestamp();
@@ -1713,7 +1716,7 @@ mod tests {
     // ── Pause / Unpause Tests ─────────────────────────────────────────────────
 
     /// Test 1: Admin pauses at 50% vesting. Verify get_status shows amount frozen
-    /// and claim() fails with Paused.
+    /// and claim() fails with VestingError::Paused.
     #[test]
     fn test_pause_freezes_vested_amount_and_blocks_claim() {
         let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
@@ -1729,7 +1732,7 @@ mod tests {
         assert!(status.paused);
         assert_eq!(status.vested, 500_000); // frozen at 50%
 
-        // claim must fail
+        // claim must fail with Paused, not Unauthorized
         assert_eq!(client.try_claim(), Err(Ok(VestingError::Paused)));
     }
 
@@ -1776,6 +1779,50 @@ mod tests {
         // effective end_time = new start_time + duration = original_start + 200 + 1000
         let expected_end = original_start + 200 + 1000;
         assert_eq!(config.start_time + config.duration_seconds, expected_end);
+    }
+
+    /// Verifies that paused time is excluded from vested amounts and claim().
+    ///
+    /// Timeline (cliff=0, duration=1000, total=10_000, start_time=0):
+    ///   t=0    initialize  → vested = 0
+    ///   t=200  pause       → vested = 10_000 * 200/1000 = 2_000 (frozen)
+    ///   t=400  unpause     → start_time shifts to 200 (paused 200s)
+    ///   t=600  check       → active elapsed = (600-200) = 400s
+    ///                        vested = 10_000 * 400/1000 = 4_000
+    ///   t=600  claim()     → returns 4_000
+    ///   t=1200 check       → active elapsed = (1200-200) = 1000s → fully vested
+    #[test]
+    fn test_unpause_paused_time_excluded_from_vested_amounts() {
+        let (env, contract_id, token_id, beneficiary, admin) = setup_with_token();
+        let client = ForgeVestingClient::new(&env, &contract_id);
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        client.initialize(&token_id, &beneficiary, &admin, &10_000, &0, &1000);
+
+        // t=200: pause — 200s active → vested = 2_000
+        env.ledger().with_mut(|l| l.timestamp = 200);
+        client.pause();
+        assert_eq!(client.get_status().vested, 2_000);
+
+        // t=400: unpause — paused for 200s, start_time shifts to 200
+        env.ledger().with_mut(|l| l.timestamp = 400);
+        client.unpause();
+        assert_eq!(client.get_config().start_time, 200);
+
+        // t=600: 200s pre-pause + 200s post-resume = 400 active seconds
+        // vested = 10_000 * 400/1000 = 4_000
+        env.ledger().with_mut(|l| l.timestamp = 600);
+        let status = client.get_status();
+        assert_eq!(status.vested, 4_000, "vested at t=600 should be 4_000");
+        assert!(!status.fully_vested);
+
+        let claimed = client.claim();
+        assert_eq!(claimed, 4_000, "claim() at t=600 should return 4_000");
+
+        // t=1200: active elapsed = 1200 - 200 = 1000s → fully vested
+        env.ledger().with_mut(|l| l.timestamp = 1200);
+        let status = client.get_status();
+        assert!(status.fully_vested, "should be fully vested at t=1200");
+        assert_eq!(status.vested, 10_000);
     }
 
     /// Test 4: Non-admin cannot pause or unpause.
@@ -2172,7 +2219,7 @@ mod tests {
     }
 
     /// Verifies that no "admin_transferred" event is emitted when transfer_admin() fails
-    /// (e.g. SameAdmin case).
+    /// (e.g., SameAdmin case).
     #[test]
     fn test_event_admin_transferred_not_emitted_on_failure() {
         use soroban_sdk::{testutils::Events, Symbol, TryFromVal};
