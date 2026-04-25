@@ -135,6 +135,8 @@ Deploy tokens on a vesting schedule with an optional cliff period. Perfect for t
 A single-deployment factory that manages multiple vesting schedules. Eliminates the need to deploy a separate contract per beneficiary — ideal for companies vesting tokens for many employees or investors.
 
 * **Key Function:** `create_schedule(token, beneficiary, admin, total_amount, cliff_seconds, duration_seconds) -> u64` — creates a new schedule and returns its `schedule_id`. Transfers tokens from admin into the factory on creation.
+
+📖 **[Detailed Documentation →](contracts/forge-vesting-factory/README.md)**
 * **Action:** `claim(schedule_id)` — beneficiary withdraws all currently unlocked tokens for that schedule.
 * **Security:** `cancel(schedule_id)` — admin cancels a schedule; vested tokens go to the beneficiary, unvested tokens return to the admin.
 * **Read functions:**

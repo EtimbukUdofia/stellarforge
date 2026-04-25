@@ -585,4 +585,80 @@ mod tests {
             Ok(FactoryError::InvalidConfig)
         );
     }
+
+    /// Test multiple schedules for same beneficiary are fully independent.
+    /// 
+    /// Creates two schedules for the same beneficiary with different admins and amounts,
+    /// then verifies that claiming from one doesn't affect the other, and cancelling
+    /// one doesn't affect the other.
+    #[test]
+    fn test_multiple_schedules_same_beneficiary_independent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 0);
+        let client = make_client(&env);
+        
+        // Create different admins for each schedule
+        let admin_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let token = setup_token(&env, &admin_a, 3_000); // Fund admin_a initially
+        
+        // Fund admin_b separately
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&admin_a, &admin_b, &1_000);
+
+        // Create schedule_a: 1000 tokens, 1000 second duration
+        let schedule_a = client.create_schedule(&token, &beneficiary, &admin_a, &1_000, &0, &1_000);
+        
+        // Create schedule_b: 500 tokens, 1000 second duration  
+        let schedule_b = client.create_schedule(&token, &beneficiary, &admin_b, &500, &0, &1_000);
+
+        // Verify schedule count is 2
+        assert_eq!(client.get_schedule_count(), 2);
+
+        // Advance time to 50% (500 seconds)
+        env.ledger().with_mut(|l| l.timestamp = 500);
+
+        // Claim from schedule_a only
+        let claimed_amount = client.claim(&schedule_a);
+        assert_eq!(claimed_amount, 500); // 50% of 1000 = 500
+
+        // Verify schedule_a status reflects the claim
+        let status_a = client.get_status(&schedule_a);
+        assert_eq!(status_a.claimed, 500);
+        assert_eq!(status_a.claimable, 0);
+
+        // Verify schedule_b is unaffected (still 0 claimed)
+        let status_b = client.get_status(&schedule_b);
+        assert_eq!(status_b.claimed, 0);
+        assert_eq!(status_b.claimable, 250); // 50% of 500 = 250
+
+        // Cancel schedule_b
+        client.cancel(&schedule_b);
+
+        // Verify schedule_b is cancelled
+        let status_b_cancelled = client.get_status(&schedule_b);
+        assert!(status_b_cancelled.cancelled);
+
+        // Verify schedule_a is still active and claimable
+        let status_a_after_cancel = client.get_status(&schedule_a);
+        assert!(!status_a_after_cancel.cancelled);
+        assert_eq!(status_a_after_cancel.claimed, 500); // Still has previous claim
+        
+        // Advance to full vesting for schedule_a
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        
+        // Should be able to claim remaining amount from schedule_a
+        let final_claim = client.claim(&schedule_a);
+        assert_eq!(final_claim, 500); // Remaining 50% = 500
+        
+        // Verify schedule_a is fully claimed
+        let status_a_final = client.get_status(&schedule_a);
+        assert_eq!(status_a_final.claimed, 1_000); // Total claimed = 1_000
+        assert!(status_a_final.fully_vested);
+
+        // Schedule count should remain 2 throughout
+        assert_eq!(client.get_schedule_count(), 2);
+    }
 }
