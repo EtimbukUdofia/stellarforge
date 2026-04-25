@@ -1,9 +1,7 @@
 #![no_std]
 
 //! # forge-multisig
-//!
 //! An N-of-M multisig treasury contract for Stellar/Soroban.
-//!
 //! ## Features
 //! - N-of-M signature threshold for transaction approval
 //! - Timelock delay before execution after approval
@@ -116,7 +114,6 @@ impl MultisigContract {
     /// # Errors
     /// - [`MultisigError::AlreadyInitialized`] — Contract has already been initialized.
     /// - [`MultisigError::InvalidThreshold`] — `threshold` is 0 or exceeds the number of unique owners.
-    ///
     /// # Example
     /// ```text
     /// // 2-of-3 multisig with a 3600 s (1 h) timelock
@@ -250,12 +247,17 @@ impl MultisigContract {
         if approved_at.is_some() {
             let committed: i128 = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::CommittedAmount(token.clone()))
                 .unwrap_or(0);
-            env.storage().instance().set(
+            env.storage().persistent().set(
                 &DataKey::CommittedAmount(token.clone()),
                 &(committed + amount),
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::CommittedAmount(token.clone()),
+                31536000,
+                31536000,
             );
         }
 
@@ -359,12 +361,17 @@ impl MultisigContract {
         if approved_at.is_some() {
             let committed: i128 = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::CommittedAmount(xlm_token.clone()))
                 .unwrap_or(0);
-            env.storage().instance().set(
+            env.storage().persistent().set(
                 &DataKey::CommittedAmount(xlm_token.clone()),
                 &(committed + amount),
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::CommittedAmount(xlm_token.clone()),
+                31536000,
+                31536000,
             );
         }
 
@@ -450,12 +457,17 @@ impl MultisigContract {
             // Track committed tokens to prevent over-commitment across concurrent proposals
             let committed: i128 = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::CommittedAmount(proposal.token.clone()))
                 .unwrap_or(0);
-            env.storage().instance().set(
+            env.storage().persistent().set(
                 &DataKey::CommittedAmount(proposal.token.clone()),
                 &(committed + proposal.amount),
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::CommittedAmount(proposal.token.clone()),
+                31536000,
+                31536000,
             );
         }
 
@@ -601,11 +613,6 @@ impl MultisigContract {
             return Err(MultisigError::TimelockNotElapsed);
         }
 
-        proposal.executed = true;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-
         let token_client = token::Client::new(&env, &proposal.token);
 
         // Verify the treasury holds enough to cover all committed proposals.
@@ -614,7 +621,7 @@ impl MultisigContract {
         // in `proposal.token`, so the call is identical in both cases.
         let committed: i128 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::CommittedAmount(proposal.token.clone()))
             .unwrap_or(0);
         let balance = token_client.balance(&env.current_contract_address());
@@ -638,9 +645,14 @@ impl MultisigContract {
 
         // Release the committed amount for this proposal
         let new_committed = committed.saturating_sub(proposal.amount);
-        env.storage().instance().set(
+        env.storage().persistent().set(
             &DataKey::CommittedAmount(proposal.token.clone()),
             &new_committed,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::CommittedAmount(proposal.token.clone()),
+            31536000,
+            31536000,
         );
 
         env.storage().instance().extend_ttl(17280, 34560);
@@ -673,7 +685,6 @@ impl MultisigContract {
     /// - [`MultisigError::AlreadyExecuted`] — The proposal has already been executed.
     /// - [`MultisigError::AlreadyCancelled`] — The proposal has already been cancelled.
     /// - [`MultisigError::CannotCancel`] — The proposal can still reach the approval threshold.
-    ///
     /// # Example
     /// ```text
     /// // Cancel a proposal that can no longer reach threshold
@@ -703,12 +714,18 @@ impl MultisigContract {
             if proposal.approved_at.is_some() {
                 let committed: i128 = env
                     .storage()
-                    .instance()
+                    .persistent()
                     .get(&DataKey::CommittedAmount(proposal.token.clone()))
                     .unwrap_or(0);
-                env.storage().instance().set(
+                let new_committed = committed.saturating_sub(proposal.amount);
+                env.storage().persistent().set(
                     &DataKey::CommittedAmount(proposal.token.clone()),
-                    &committed.saturating_sub(proposal.amount),
+                    &new_committed,
+                );
+                env.storage().persistent().extend_ttl(
+                    &DataKey::CommittedAmount(proposal.token.clone()),
+                    31536000,
+                    31536000,
                 );
             }
             env.storage()
@@ -753,12 +770,18 @@ impl MultisigContract {
             if proposal.approved_at.is_some() {
                 let committed: i128 = env
                     .storage()
-                    .instance()
+                    .persistent()
                     .get(&DataKey::CommittedAmount(proposal.token.clone()))
                     .unwrap_or(0);
-                env.storage().instance().set(
+                let new_committed = committed.saturating_sub(proposal.amount);
+                env.storage().persistent().set(
                     &DataKey::CommittedAmount(proposal.token.clone()),
-                    &committed.saturating_sub(proposal.amount),
+                    &new_committed,
+                );
+                env.storage().persistent().extend_ttl(
+                    &DataKey::CommittedAmount(proposal.token.clone()),
+                    31536000,
+                    31536000,
                 );
             }
             env.storage()
@@ -928,7 +951,7 @@ impl MultisigContract {
     /// `i128` — total committed tokens for `token`. Returns `0` if none committed.
     pub fn get_committed_amount(env: Env, token: Address) -> i128 {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::CommittedAmount(token))
             .unwrap_or(0)
     }
