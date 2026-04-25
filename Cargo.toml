@@ -9,12 +9,11 @@ members = [
     "contracts/forge-multisig",
     "contracts/forge-governor",
     "contracts/forge-oracle",
-    "benches",
 ]
 
 [workspace.dependencies]
 soroban-sdk = { version = "21.7.6" }
-forge-errors = { workspace = true }
+forge-errors = { path = "crates/forge-errors" }
 
 [profile.release]
 opt-level = "z"
