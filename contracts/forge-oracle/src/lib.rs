@@ -1,7 +1,6 @@
 #![no_std]
 
 //! # forge-oracle
-//!
 //! Standardized price feed interface for Stellar/Soroban contracts.
 //!
 //! ## Features
@@ -11,9 +10,7 @@
 //! - Event emission on every price update
 
 use forge_errors::CommonError;
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -192,7 +189,9 @@ impl ForgeOracle {
                 quote: quote.clone(),
             });
             env.storage().persistent().set(&DataKey::Pairs, &pairs);
-            env.storage().persistent().extend_ttl(&DataKey::Pairs, 17280, 34560);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::Pairs, 17280, 34560);
         }
 
         env.storage()
