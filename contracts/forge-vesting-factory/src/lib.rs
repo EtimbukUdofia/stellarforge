@@ -26,6 +26,8 @@ pub enum DataKey {
     Claimed(u64),
     /// Monotonically increasing schedule counter.
     ScheduleCount,
+    /// Vested amount at the time of cancellation, keyed by schedule_id.
+    VestedAtCancel(u64),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -69,6 +71,7 @@ pub enum FactoryError {
     NothingToClaim = 4,
     Cancelled = 5,
     InvalidConfig = 6,
+    VestingComplete = 7,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -113,7 +116,7 @@ impl ForgeVestingFactory {
 
         let id: u64 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::ScheduleCount)
             .unwrap_or(0);
 
@@ -139,8 +142,14 @@ impl ForgeVestingFactory {
             .persistent()
             .set(&DataKey::Schedule(id), &config);
         env.storage()
-            .instance()
+            .persistent()
+            .extend_ttl(&DataKey::Schedule(id), 17280, 34560);
+        env.storage()
+            .persistent()
             .set(&DataKey::ScheduleCount, &(id + 1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::ScheduleCount, 17280, 34560);
 
         env.events()
             .publish((Symbol::new(&env, "schedule_created"),), (id, total_amount));
@@ -197,6 +206,12 @@ impl ForgeVestingFactory {
         env.storage()
             .persistent()
             .set(&DataKey::Claimed(schedule_id), &(claimed + claimable));
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Schedule(schedule_id), 17280, 34560);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Claimed(schedule_id), 17280, 34560);
 
         token::Client::new(&env, &config.token).transfer(
             &env.current_contract_address(),
@@ -235,6 +250,11 @@ impl ForgeVestingFactory {
         }
 
         let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(config.start_time);
+        if elapsed >= config.duration_seconds {
+            return Err(FactoryError::VestingComplete);
+        }
+
         let vested = Self::compute_vested(&config, now);
         let claimed: i128 = env
             .storage()
@@ -277,6 +297,23 @@ impl ForgeVestingFactory {
             );
         }
 
+        config.cancelled = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Schedule(schedule_id), &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VestedAtCancel(schedule_id), &vested);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Schedule(schedule_id), 17280, 34560);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Claimed(schedule_id), 17280, 34560);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::VestedAtCancel(schedule_id), 17280, 34560);
+
         env.events()
             .publish((Symbol::new(&env, "schedule_cancelled"),), (schedule_id,));
 
@@ -303,7 +340,14 @@ impl ForgeVestingFactory {
             .ok_or(FactoryError::ScheduleNotFound)?;
 
         let now = env.ledger().timestamp();
-        let vested = Self::compute_vested(&config, now);
+        let vested = if config.cancelled {
+            env.storage()
+                .persistent()
+                .get(&DataKey::VestedAtCancel(schedule_id))
+                .unwrap_or(0)
+        } else {
+            Self::compute_vested(&config, now)
+        };
         let claimed: i128 = env
             .storage()
             .persistent()
@@ -311,7 +355,7 @@ impl ForgeVestingFactory {
             .unwrap_or(0);
 
         let elapsed = now.saturating_sub(config.start_time);
-        let claimable = if elapsed >= config.cliff_seconds {
+        let claimable = if !config.cancelled && elapsed >= config.cliff_seconds {
             (vested - claimed).max(0)
         } else {
             0
@@ -332,7 +376,7 @@ impl ForgeVestingFactory {
     /// Return the total number of schedules ever created.
     pub fn get_schedule_count(env: Env) -> u64 {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::ScheduleCount)
             .unwrap_or(0)
     }
@@ -340,9 +384,6 @@ impl ForgeVestingFactory {
     // ── Internal ──────────────────────────────────────────────────────────────
 
     fn compute_vested(config: &ScheduleConfig, now: u64) -> i128 {
-        if config.cancelled {
-            return 0;
-        }
         let elapsed = now.saturating_sub(config.start_time);
         if elapsed < config.cliff_seconds {
             return 0;
@@ -594,6 +635,8 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_get_status_vested_reflects_cancel_time_not_zero() {
     // ── #436 comprehensive tests ──────────────────────────────────────────────
 
     /// claim() at 25%, 50%, 75%, and 100% of vesting duration returns correct amounts.
@@ -613,6 +656,23 @@ mod tests {
         let admin = Address::generate(&env);
         let beneficiary = Address::generate(&env);
         let token_addr = setup_token(&env, &admin, 1_000);
+
+        let id = client.create_schedule(&token_addr, &beneficiary, &admin, &1_000, &0, &1_000);
+
+        // 400s elapsed — 400 tokens vested at cancel time
+        env.ledger().with_mut(|l| l.timestamp = 400);
+        client.cancel(&id);
+
+        // Advance time further — vested must still reflect cancel-time amount
+        env.ledger().with_mut(|l| l.timestamp = 900);
+        let status = client.get_status(&id);
+        assert_eq!(status.vested, 400, "vested should reflect amount at cancel time");
+        assert_eq!(status.claimable, 0, "claimable should be 0 after cancel pays out");
+        assert!(status.cancelled);
+    }
+
+    #[test]
+    fn test_cancel_fully_vested_schedule_fails() {
         let tok = token::Client::new(&env, &token_addr);
 
         // No cliff, 1000s duration, 1000 tokens
@@ -696,6 +756,40 @@ mod tests {
         let token = setup_token(&env, &admin, 1_000);
 
         let id = client.create_schedule(&token, &beneficiary, &admin, &1_000, &0, &1_000);
+
+        // Advance past full duration
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let err = client.try_cancel(&id).unwrap_err();
+        assert_eq!(err, Ok(FactoryError::VestingComplete));
+    }
+
+    #[test]
+    fn test_schedule_ids_are_sequential_and_never_collide() {
+        // Creates N schedules and verifies every returned ID is unique and
+        // matches its position, proving ScheduleCount is durable across calls.
+        const N: u64 = 10;
+        let env = Env::default();
+        env.mock_all_auths();
+        let client = make_client(&env);
+        let admin = Address::generate(&env);
+        let token = setup_token(&env, &admin, 1_000 * N as i128);
+
+        let mut ids = std::vec::Vec::new();
+        for _ in 0..N {
+            let b = Address::generate(&env);
+            ids.push(client.create_schedule(&token, &b, &admin, &1_000, &0, &1_000));
+        }
+
+        // IDs must be 0..N-1 with no gaps or duplicates
+        for (i, &id) in ids.iter().enumerate() {
+            assert_eq!(id, i as u64);
+        }
+        assert_eq!(client.get_schedule_count(), N);
+
+        // Every schedule must still be independently retrievable
+        for id in 0..N {
+            assert!(client.try_get_status(&id).is_ok());
+        }
         client.cancel(&id);
 
         assert_eq!(
